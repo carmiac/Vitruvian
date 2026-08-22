@@ -1,0 +1,4 @@
+# Vendored third-party code: libhttpd from thttpd, Jef Poskanzer
+# https://www.acme.com/software/thttpd/
+DisableFormat: true
+SortIncludes: Never

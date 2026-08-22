@@ -1,0 +1,58 @@
+name: Formatting advice
+
+on: pull_request
+
+jobs:
+  clang-format:
+    name: clang-format advice
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-18
+          clang-format-18 --version
+
+      - name: Report formatting of changed lines
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git clang-format \
+            --binary clang-format-18 \
+            --extensions c,cpp,cc \
+            --diff "$BASE_SHA" > format.diff 2>format.err || true
+
+          if grep -qE '^(no modified files to format|clang-format did not modify any files)$' format.diff \
+             || [ ! -s format.diff ]; then
+            echo "### Formatting looks good" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### clang-format suggestions:"
+            echo "To apply them locally:"
+            echo ""
+            echo '```sh'
+            echo "git clang-format --extensions c,cpp,cc $BASE_SHA"
+            echo '```'
+            echo ""
+            echo "<details><summary>Suggested diff</summary>"
+            echo ""
+            echo '```diff'
+            cat format.diff
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "--- suggested formatting changes ---"
+          cat format.diff
+
+          exit 0

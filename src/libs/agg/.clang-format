@@ -1,0 +1,4 @@
+# Vendored third-party code: Anti-Grain Geometry 2.4, Maxim Shemanarev
+# http://www.antigrain.com
+DisableFormat: true
+SortIncludes: Never

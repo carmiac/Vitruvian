@@ -1,0 +1,4 @@
+# Vendored third-party code: CppUnit
+# https://sourceforge.net/projects/cppunit/
+DisableFormat: true
+SortIncludes: Never

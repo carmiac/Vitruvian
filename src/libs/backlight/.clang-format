@@ -1,0 +1,4 @@
+# Vendored third-party code: libbacklight, Intel Corporation / Red Hat
+# https://cgit.freedesktop.org/xorg/app/libbacklight
+DisableFormat: true
+SortIncludes: Never

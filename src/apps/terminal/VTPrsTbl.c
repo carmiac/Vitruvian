@@ -14,6 +14,7 @@
 
 #include "VTparse.h"
 
+// clang-format off
 
 // #pragma mark UTF8 coding ground table
 int gUTF8GroundTable[] =
@@ -3749,3 +3750,5 @@ NULL,
 "\xC2\xB7", // ACS_BULLET
 NULL
 };
+
+// clang-format on

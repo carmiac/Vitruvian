@@ -1,0 +1,4 @@
+# Vendored third-party code: M_APM arbitrary-precision math, Michael C. Ring
+# https://github.com/LuaDist/mapm
+DisableFormat: true
+SortIncludes: Never

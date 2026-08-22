@@ -1,0 +1,4 @@
+# Vendored third-party code: libvterm, Paul Evans
+# https://www.leonerd.org.uk/code/libvterm/
+DisableFormat: true
+SortIncludes: Never

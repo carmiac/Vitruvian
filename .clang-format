@@ -1,0 +1,112 @@
+# Vitruvian coding style.
+#
+# The BeOS style is rather idosyncratic, but this matches it pretty well for
+# c/cpp files. It doesn't even try for header files, as they are just too
+# bespoke.
+#
+# Use this on new or changed code only via `git clang-format`.
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+
+# Tabs, 4 wide, 80 columns. Continuation is one further tab, never aligned
+# to the opening bracket.
+ColumnLimit: 80
+UseTab: ForContinuationAndIndentation
+TabWidth: 4
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+PPIndentWidth: 4
+
+# Allman for function bodies only. Classes, structs, enums, namespaces and
+# control statements keep the brace on the same line, and "} else {" stays
+# on one line.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: true
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+# Return type on its own line, for definitions only.
+AlwaysBreakAfterReturnType: AllDefinitions
+
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+AlignEscapedNewlines: DontAlign
+AlignTrailingComments: true
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignArrayOfStructures: None
+
+# Operators go at the start of the continuation line, never at the end.
+BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: false
+AlwaysBreakTemplateDeclarations: Yes
+AlwaysBreakBeforeMultilineStrings: false
+
+# One initialiser per line.
+BreakConstructorInitializers: AfterColon
+PackConstructorInitializers: Never
+
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+
+IndentCaseLabels: true
+IndentCaseBlocks: false
+IndentGotoLabels: false
+IndentPPDirectives: AfterHash
+NamespaceIndentation: None
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: false
+SpaceBeforeParens: ControlStatements
+SpaceBeforeCpp11BracedList: false
+SpacesBeforeTrailingComments: 1
+Cpp11BracedListStyle: false
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+
+# The include blocks here are hand-grouped (own header, C++, POSIX, public
+# BeOS, private) and are not strictly sorted within a group. Leave them alone.
+SortIncludes: Never
+SortUsingDeclarations: false
+FixNamespaceComments: false
+ReflowComments: false
+InsertBraces: false
+
+# Discourage breaking at "=" - the codebase breaks inside the call arguments
+# instead.
+PenaltyBreakAssignment: 100
