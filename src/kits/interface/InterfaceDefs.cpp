@@ -1509,9 +1509,6 @@ _init_interface_kit_()
 	_init_global_fonts_();
 
 	BPrivate::gWidthBuffer = new BPrivate::WidthBuffer;
-	status = BPrivate::MenuPrivate::CreateBitmaps();
-	if (status != B_OK)
-		return status;
 
 	_menu_info_ptr_ = &BMenu::sMenuInfo;
 
@@ -1534,8 +1531,6 @@ _init_interface_kit_()
 extern "C" status_t
 _fini_interface_kit_()
 {
-	BPrivate::MenuPrivate::DeleteBitmaps();
-
 	delete BPrivate::gWidthBuffer;
 	BPrivate::gWidthBuffer = NULL;
 
