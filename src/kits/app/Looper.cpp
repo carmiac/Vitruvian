@@ -504,9 +504,9 @@ BLooper::Run()
 		return fMsgPort;
 
 	fRunCalled = true;
+	Unlock();
 
 	status_t err = resume_thread(fThread);
-	Unlock();
 	if (err < B_OK)
 		return err;
 
