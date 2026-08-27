@@ -1,5 +1,8 @@
 /*
- * LinuxKeycodeMap.h — evdev scancode → Haiku keycode translation.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
+ * Distributed under the terms of the MIT License.
+ *
+ * LinuxKeycodeMap.h — evdev scancode -> Haiku keycode translation.
  *
  * Maps Linux evdev key codes (from struct input_event.code) to the
  * Haiku physical keycode space used in B_KEY_DOWN/B_KEY_UP messages.
@@ -115,7 +118,7 @@ static const uint8 kEvdevToHaiku[256] = {
 	/* 0x53 KEY_KPDOT       */  0x65,
 	/* 0x54 */  0,
 	/* 0x55 */  0,
-	/* 0x56 KEY_102ND       */  0x33,  /* extra key on 102-key European layouts */
+	/* 0x56 KEY_102ND       */  0x69,  /* extra key on 102-key European layouts */
 	/* 0x57 KEY_F11         */  0x0c,
 	/* 0x58 KEY_F12         */  0x0d,
 	/* 0x59 */  0,
@@ -146,7 +149,7 @@ static const uint8 kEvdevToHaiku[256] = {
 	/* 0x72 */  0,
 	/* 0x73 */  0,
 	/* 0x74 */  0,
-	/* 0x75 */  0,
+	/* 0x75 KEY_KPEQUAL     */  0x6a,
 	/* 0x76 */  0,
 	/* 0x77 KEY_PAUSE       */  0x10,
 	/* 0x78 */  0,
@@ -163,9 +166,20 @@ static const uint8 kEvdevToHaiku[256] = {
 	/* 0x98–0x9f */  0,0,0,0, 0,0,0,0,
 	/* 0xa0–0xa7 */  0,0,0,0, 0,0,0,0,
 	/* 0xa8–0xaf */  0,0,0,0, 0,0,0,0,
-	/* 0xb0–0xb7 */  0,0,0,0, 0,0,0,0,
-	/* 0xb8–0xbf */  0,0,0,0, 0,0,0,0,
-	/* 0xc0–0xc7 */  0,0,0,0, 0,0,0,0,
+	/* 0xb0–0xb6 */  0,0,0,0, 0,0,0,
+	/* 0xb7 KEY_F13         */  0x6b,
+	/* 0xb8 KEY_F14         */  0x6c,
+	/* 0xb9 KEY_F15         */  0x6d,
+	/* 0xba KEY_F16         */  0x6e,
+	/* 0xbb KEY_F17         */  0x6f,
+	/* 0xbc KEY_F18         */  0x70,
+	/* 0xbd KEY_F19         */  0x71,
+	/* 0xbe KEY_F20         */  0x72,
+	/* 0xbf KEY_F21         */  0x73,
+	/* 0xc0 KEY_F22         */  0x74,
+	/* 0xc1 KEY_F23         */  0x75,
+	/* 0xc2 KEY_F24         */  0x76,
+	/* 0xc3–0xc7 */  0,0,0,0, 0,
 	/* 0xc8–0xcf */  0,0,0,0, 0,0,0,0,
 	/* 0xd0–0xd7 */  0,0,0,0, 0,0,0,0,
 	/* 0xd8–0xdf */  0,0,0,0, 0,0,0,0,

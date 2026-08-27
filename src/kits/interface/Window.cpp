@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2025 Haiku, Inc. All rights reserved
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -7,6 +8,7 @@
  *		Axel Dörfler, axeld@pinc-software.de
  *		Adrian Oanca, adioanca@cotty.iren.ro
  *		John Scipione, jscipione@gmail.com
+ *		Dario Casalinuovo
  */
 
 
@@ -221,6 +223,11 @@ _set_menu_sem_(BWindow* window, sem_id sem)
 	if (window != NULL)
 		window->fMenuSem = sem;
 }
+
+
+// Deskbar switcher chord (Ctrl+`): Haiku legacy keycode, not raw evdev
+// KEY_GRAVE (41).
+static const int32 kBacktickKey = 0x11;
 
 
 //	#pragma mark -
@@ -3630,6 +3637,42 @@ BWindow::_Switcher(int32 rawKey, uint32 modifiers, bool repeat)
 
 	TODO: must also convert the incoming key to the font encoding of the target
 */
+// US layout character fallback for non-Latin layouts (matches GTK/Qt/Windows behavior)
+// Keypad omitted.
+static const struct {
+	uint8	keyCode;
+	char	character;
+} kUSShortcutCharacters[] = {
+	{ 0x11, '`' }, { 0x12, '1' }, { 0x13, '2' }, { 0x14, '3' },
+	{ 0x15, '4' }, { 0x16, '5' }, { 0x17, '6' }, { 0x18, '7' },
+	{ 0x19, '8' }, { 0x1a, '9' }, { 0x1b, '0' }, { 0x1c, '-' },
+	{ 0x1d, '=' },
+	{ 0x27, 'q' }, { 0x28, 'w' }, { 0x29, 'e' }, { 0x2a, 'r' },
+	{ 0x2b, 't' }, { 0x2c, 'y' }, { 0x2d, 'u' }, { 0x2e, 'i' },
+	{ 0x2f, 'o' }, { 0x30, 'p' }, { 0x31, '[' }, { 0x32, ']' },
+	{ 0x33, '\\' },
+	{ 0x3c, 'a' }, { 0x3d, 's' }, { 0x3e, 'd' }, { 0x3f, 'f' },
+	{ 0x40, 'g' }, { 0x41, 'h' }, { 0x42, 'j' }, { 0x43, 'k' },
+	{ 0x44, 'l' }, { 0x45, ';' }, { 0x46, '\'' },
+	{ 0x4c, 'z' }, { 0x4d, 'x' }, { 0x4e, 'c' }, { 0x4f, 'v' },
+	{ 0x50, 'b' }, { 0x51, 'n' }, { 0x52, 'm' }, { 0x53, ',' },
+	{ 0x54, '.' }, { 0x55, '/' },
+	{ 0x69, '<' },
+};
+
+
+static char
+us_shortcut_character(uint32 keyCode)
+{
+	for (size_t i = 0; i < B_COUNT_OF(kUSShortcutCharacters); i++) {
+		if (kUSShortcutCharacters[i].keyCode == keyCode)
+			return kUSShortcutCharacters[i].character;
+	}
+
+	return 0;
+}
+
+
 bool
 BWindow::_HandleKeyDown(BMessage* event)
 {
@@ -3652,6 +3695,15 @@ BWindow::_HandleKeyDown(BMessage* event)
 	if (event->FindInt32("key", (int32*)&rawKey) != B_OK)
 		rawKey = 0;
 
+	// ctrl mode: xkb's Control transform may leave "bytes" holding a control character
+	// where the shortcut wants the plain letter; raw_char is swap-invariant
+	int32 rawChar;
+	if ((modifiers & B_COMMAND_KEY) != 0 && (uint8)bytes[0] < 0x20
+		&& event->FindInt32("raw_char", &rawChar) == B_OK
+		&& rawChar >= 0x20 && rawChar < 0x7f) {
+		key = Shortcut::PrepareKey((char)rawChar);
+	}
+
 	// handle BMenuBar key
 	if (key == B_ESCAPE && (modifiers & B_COMMAND_KEY) != 0 && fKeyMenuBar != NULL) {
 		fKeyMenuBar->StartMenuBar(0, true, false, NULL);
@@ -3667,7 +3719,8 @@ BWindow::_HandleKeyDown(BMessage* event)
 	}
 
 	// Deskbar's Switcher
-	if ((key == B_TAB || rawKey == 41 /* KEY_GRAVE */) && (modifiers & B_CONTROL_KEY) != 0) {
+	if ((key == B_TAB || rawKey == kBacktickKey)
+		&& (modifiers & B_CONTROL_KEY) != 0) {
 		_Switcher(rawKey, modifiers, event->HasInt32("be:key_repeat"));
 		return true;
 	}
@@ -3747,8 +3800,19 @@ BWindow::_HandleKeyDown(BMessage* event)
 		// a shortcut for the given key.
 		MenusBeginning();
 
-		Shortcut* shortcut = _FindShortcut(key, modifiers
-			| (((modifiers & B_COMMAND_KEY) == 0) ? B_NO_COMMAND_KEY : 0));
+		uint32 lookupModifiers = modifiers
+			| (((modifiers & B_COMMAND_KEY) == 0) ? B_NO_COMMAND_KEY : 0);
+		Shortcut* shortcut = _FindShortcut(key, lookupModifiers);
+
+		if (shortcut == NULL) {
+			char positional = us_shortcut_character(rawKey);
+			if (positional != 0) {
+				uint32 positionalKey = Shortcut::PrepareKey(positional);
+				if (positionalKey != (uint32)(uint8)key)
+					shortcut = _FindShortcut(positionalKey, lookupModifiers);
+			}
+		}
+
 		if (shortcut != NULL) {
 			// TODO: would be nice to move this functionality to
 			//	a Shortcut::Invoke() method - but since BMenu::InvokeItem()
@@ -3808,7 +3872,7 @@ BWindow::_HandleUnmappedKeyDown(BMessage* event)
 		return false;
 
 	// Deskbar's Switcher
-	if (rawKey == 41 /* KEY_GRAVE */ && (modifiers & B_CONTROL_KEY) != 0) {
+	if (rawKey == kBacktickKey && (modifiers & B_CONTROL_KEY) != 0) {
 		_Switcher(rawKey, modifiers, event->HasInt32("be:key_repeat"));
 		return true;
 	}

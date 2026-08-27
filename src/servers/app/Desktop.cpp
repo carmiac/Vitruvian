@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2020, Haiku.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -13,6 +14,7 @@
  *		Joseph Groover, looncraz@looncraz.net
  *		Tri-Edge AI
  *		Jacob Secunda, secundja@gmail.com
+ *		Dario Casalinuovo
  */
 
 
@@ -179,6 +181,11 @@ KeyboardFilter::_UpdateFocus(int32 key, uint32 modifiers, EventTarget** _target)
 }
 
 
+// Legacy Haiku keycodes (hybrid space, key <= 0x7f); not evdev codes.
+static const int32 kEscapeKey = 0x01;
+static const int32 kBacktickKey = 0x11;
+
+
 filter_result
 KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 	int32* /*_viewToken*/, BMessage* /*latestMouseMoved*/)
@@ -191,7 +198,7 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 
 	if ((message->what == B_KEY_DOWN || message->what == B_UNMAPPED_KEY_DOWN)) {
 		// Check for safe video mode (shift + cmd + ctrl + escape)
-		if (key == 0x01 && (modifiers & B_COMMAND_KEY) != 0
+		if (key == kEscapeKey && (modifiers & B_COMMAND_KEY) != 0
 			&& (modifiers & B_CONTROL_KEY) != 0
 			&& (modifiers & B_SHIFT_KEY) != 0) {
 			system("screenmode --fall-back &");
@@ -201,11 +208,13 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 		bool takeWindow = (modifiers & B_SHIFT_KEY) != 0
 			|| fDesktop->MouseEventWindow() != NULL;
 		if (key >= B_F1_KEY && key <= B_F12_KEY) {
-			// workspace change
-
+			// Command+Fn (upstream) and Option+Fn both accepted: Option+Fn
+			// covers VT-switch chords the keyboard add-on already swallows,
+			// so this can't double-fire.
 #if !TEST_MODE
-			if ((modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
-					== B_COMMAND_KEY)
+			uint32 chord = modifiers
+				& (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY);
+			if (chord == B_OPTION_KEY || chord == B_COMMAND_KEY)
 #else
 			if ((modifiers & B_CONTROL_KEY) != 0)
 #endif
@@ -215,10 +224,13 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 				fDesktop->SetWorkspaceAsync(key - B_F1_KEY, takeWindow);
 				return B_SKIP_MESSAGE;
 			}
-		} else if (key == 0x11
-			&& (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
-					== B_COMMAND_KEY) {
-			// switch to previous workspace (command + `)
+		} else if (key == kBacktickKey
+			&& ((modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
+					== B_OPTION_KEY
+				|| (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
+					== B_COMMAND_KEY)) {
+			// Previous workspace. Option+` to match the F-keys above;
+			// Command+` still works, nothing in the console claims it.
 			fDesktop->SetWorkspaceAsync(-1, takeWindow);
 			return B_SKIP_MESSAGE;
 		}

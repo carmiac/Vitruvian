@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2015, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -9,6 +10,7 @@
  *		Michael Lotz <mmlr@mlotz.ch>
  *		Wim van der Meer <WPJvanderMeer@gmail.com>
  *		Joseph Groover <looncraz@looncraz.net>
+ *		Dario Casalinuovo
  */
 
 
@@ -657,7 +659,7 @@ get_click_speed(const char* mouse_name, bigtime_t* speed)
 	if (err != B_OK)
 		return err;
 
-	if (reply.FindInt64("speed", speed) != B_OK)
+	if (reply.FindInt64("speed", speed) != B_OK || *speed <= 0)
 		*speed = 500000;
 
 	return B_OK;

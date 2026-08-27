@@ -230,6 +230,9 @@ static const int32 kTeamIconSize = 48;
 
 static const int32 kWindowScrollSteps = 3;
 
+// Legacy Haiku keycode (hybrid space, key <= 0x7f); not an evdev code.
+static const int32 kBacktickKey = 0x11;
+
 
 
 //	#pragma mark -
@@ -591,7 +594,7 @@ TSwitchManager::MessageReceived(BMessage* message)
 						int32 key = 0;
 						message->FindInt32("key", &key);
 
-						Process((modifiers & B_SHIFT_KEY) == 0, key == 0x11);
+						Process((modifiers & B_SHIFT_KEY) == 0, key == kBacktickKey);
 					}
 				}
 			} else
@@ -688,7 +691,7 @@ TSwitchManager::MainEntry(BMessage* message)
 			// Must be a multiple of the delay used above
 	}
 
-	Process((modifierKeys & B_SHIFT_KEY) == 0, key == 0x11);
+	Process((modifierKeys & B_SHIFT_KEY) == 0, key == kBacktickKey);
 }
 
 
@@ -776,7 +779,7 @@ TSwitchManager::QuickSwitch(BMessage* message)
 	if (message->FindInt32("team", &team) == B_OK) {
 		bool forward = (modifiers & B_SHIFT_KEY) == 0;
 
-		if (key == 0x11) {
+		if (key == kBacktickKey) {
 			// TODO: add the same switch logic we have for apps!
 			SwitchWindow(team, forward, true);
 		} else {

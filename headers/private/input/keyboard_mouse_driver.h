@@ -1,5 +1,6 @@
 /*
  * Copyright 2002-2025, Haiku. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  */
 #ifndef _KEYBOARD_MOUSE_DRIVER_H
@@ -13,7 +14,9 @@
 // FIXME: these should go in InterfaceDefs.h (in the same enum as B_F1_KEY), but the names would
 // clash with names in the modifiers enum also defined there, so we would need to first rename the
 // values in the modifiers enumeration.
-/* Linux evdev keycodes (used as canonical keycode space on Linux) */
+/* Raw Linux evdev keycodes. NOT the space used by the "key" field, key_map
+ * or key_states (Haiku legacy keycodes for <= 0x7f); translate with
+ * linux_to_haiku_keycode() first. Correct only for talking to evdev itself. */
 #define KEY_ShiftL      42   /* KEY_LEFTSHIFT  */
 #define KEY_ShiftR      54   /* KEY_RIGHTSHIFT */
 #define KEY_ControlL    29   /* KEY_LEFTCTRL   */
