@@ -56,6 +56,8 @@ trap 'echo "first-boot commit FAILED in $ROOT, partial state left" >&2' EXIT
 
 language=en
 keymap=us
+keymap_variant=
+keymap_options=
 username=
 password_hash=
 root_hash=
@@ -76,6 +78,8 @@ while IFS= read -r _line || [ -n "$_line" ]; do
     case "$_key" in
         language)      language=$_val ;;
         keymap)        keymap=$_val ;;
+        keymap_variant) keymap_variant=$_val ;;
+        keymap_options) keymap_options=$_val ;;
         username)      username=$_val ;;
         password_hash) password_hash=$_val ;;
         root_hash)     root_hash=$_val ;;
@@ -109,6 +113,16 @@ case "$keymap" in
     *) echo "invalid keymap: $keymap" >&2; exit 2 ;;
 esac
 [ -z "$keymap" ] && keymap=us
+case "$keymap_variant" in
+    '') ;;
+    *[!a-z0-9_-]*)
+        echo "invalid keymap variant: $keymap_variant" >&2; exit 2 ;;
+esac
+case "$keymap_options" in
+    '') ;;
+    *[!a-z0-9_:,-]*)
+        echo "invalid keymap options: $keymap_options" >&2; exit 2 ;;
+esac
 case "$hostname" in
     ''|[a-z0-9]*) ;;
     *) echo "invalid hostname: $hostname" >&2; exit 2 ;;
@@ -166,8 +180,8 @@ printf 'KEYMAP=%s\n' "$keymap" > "$ROOT/etc/vconsole.conf"
 cat > "$ROOT/etc/default/keyboard" <<KBD
 XKBMODEL="pc105"
 XKBLAYOUT="$keymap"
-XKBVARIANT=""
-XKBOPTIONS=""
+XKBVARIANT="$keymap_variant"
+XKBOPTIONS="$keymap_options"
 BACKSPACE="guess"
 KBD
 [ -x "$ROOT/usr/sbin/setupcon" ] && \
@@ -186,6 +200,12 @@ if ! $IN getent passwd "$username" >/dev/null; then
         $IN chown -R "$username:$username" "$_home" 2>/dev/null || true
     fi
 fi
+
+# The desktop never opens a logind session of its own, so without lingering
+# the user manager, and with it pipewire, exists only while someone is logged
+# in over ssh and dies again on logout.
+$IN mkdir -p /var/lib/systemd/linger 2>/dev/null || true
+$IN touch "/var/lib/systemd/linger/$username" 2>/dev/null || true
 
 printf '%s:%s\n' "$username" "$password_hash" | $IN chpasswd -e
 
@@ -241,6 +261,8 @@ fi
 {
     printf 'language=%s\n'  "$language"
     printf 'keymap=%s\n'    "$keymap"
+    printf 'keymap_variant=%s\n' "$keymap_variant"
+    printf 'keymap_options=%s\n' "$keymap_options"
     printf 'username=%s\n'  "$username"
     printf 'hostname=%s\n'  "$hostname"
     printf 'sudo=%s\n'      "$sudo_enabled"

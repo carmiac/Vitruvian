@@ -4,6 +4,6 @@ auth       required     pam_permit.so
 @include   common-password
 
 # pam_loginuid must fire before pam_systemd (via common-session).
-session    required     pam_loginuid.so
+session    optional     pam_loginuid.so
 session    optional     pam_keyinit.so force revoke
 @include   common-session

@@ -20,6 +20,8 @@ _do_commit_setup() {
 
     _language=""
     _keymap=""
+    _keymap_variant=""
+    _keymap_options=""
     _username=""
     _full_name=""
     _hostname=""
@@ -34,6 +36,8 @@ _do_commit_setup() {
         case "$_k" in
             language)      _language=$_v ;;
             keymap)        _keymap=$_v ;;
+            keymap_variant) _keymap_variant=$_v ;;
+            keymap_options) _keymap_options=$_v ;;
             username)      _username=$_v ;;
             full_name)     _full_name=$_v ;;
             hostname)      _hostname=$_v ;;
@@ -96,6 +100,16 @@ _do_commit_setup() {
             ''|[a-z]*) ;;
             *) log "invalid keymap: $_keymap"; return 2 ;;
         esac
+        case "$_keymap_variant" in
+            '') ;;
+            *[!a-z0-9_-]*)
+                log "invalid keymap variant: $_keymap_variant"; return 2 ;;
+        esac
+        case "$_keymap_options" in
+            '') ;;
+            *[!a-z0-9_:,-]*)
+                log "invalid keymap options: $_keymap_options"; return 2 ;;
+        esac
         case "$_language" in
             ''|[a-z]*) ;;
             *) log "invalid language: $_language"; return 2 ;;
@@ -135,6 +149,10 @@ _do_commit_setup() {
     {
         [ -n "$_language" ]  && printf 'language=%s\n'      "$_language"
         [ -n "$_keymap" ]    && printf 'keymap=%s\n'        "$_keymap"
+        [ -n "$_keymap_variant" ] && \
+            printf 'keymap_variant=%s\n' "$_keymap_variant"
+        [ -n "$_keymap_options" ] && \
+            printf 'keymap_options=%s\n' "$_keymap_options"
         [ -n "$_hostname" ]  && printf 'hostname=%s\n'      "$_hostname"
         [ -n "$_full_name" ] && printf 'full_name=%s\n'     "$_full_name"
         printf 'username=%s\n'       "$_username"

@@ -232,7 +232,18 @@ install -d -m 0755 -o vos_login -g vos_login /system/login 2>/dev/null || true
 for _sub in config config/settings config/cache; do
 	install -d -m 0755 -o vos_login -g vos_login \
 		/system/login/$_sub 2>/dev/null || true
+ done
+install -d -m 0755 -o vos_login -g vos_login \
+	/system/login/.config /system/login/.config/systemd \
+	/system/login/.config/systemd/user 2>/dev/null || true
+for _unit in pipewire.service pipewire.socket pipewire-pulse.service \
+		pipewire-pulse.socket wireplumber.service filter-chain.service; do
+	ln -sf /dev/null "/system/login/.config/systemd/user/$_unit" \
+		2>/dev/null || true
 done
+chown -h vos_login:vos_login /system/login/.config/systemd/user/* \
+	2>/dev/null || true
+
 # First install only — upgrades preserve the admin's autologin choice.
 if [ "${1:-}" = "configure" ] && [ -z "${2:-}" ]; then
     touch /var/lib/vos/greeter-enabled
@@ -252,4 +263,10 @@ if [ -e /etc/vos/live ]; then
         getent group "$_g" >/dev/null \
             && adduser vos-live "$_g" >/dev/null 2>&1 || true
     done
+
+    # The desktop never opens a logind session of its own, so without
+    # lingering the user manager, and with it pipewire, exists only while
+    # someone is logged in over ssh and dies again on logout.
+    mkdir -p /var/lib/systemd/linger 2>/dev/null || true
+    touch /var/lib/systemd/linger/vos-live 2>/dev/null || true
 fi

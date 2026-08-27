@@ -19,9 +19,9 @@
 #include <string.h>
 #include <time.h>
 #include <sys/ioctl.h>
-#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 extern "C" {
@@ -193,6 +193,9 @@ pam_null_conv(int num, const struct pam_message** /*msg*/,
 }
 
 
+static void close_pam_session();
+
+
 static bool
 init_pam_session()
 {
@@ -201,6 +204,14 @@ init_pam_session()
 		printf("janus: user-mode, inheriting PAM environment from login\n");
 		return true;
 	}
+
+	// The post-auth transition calls this a second time, for the real user.
+	// logind keys a session on the leader pid, which is janus either way, so
+	// leaving the greeter session open makes it hand back that same session
+	// instead of creating one: the desktop then runs as the user inside a
+	// class=greeter session owned by vos_login, with no user@<uid>.service
+	// and so no pipewire, and no XDG_RUNTIME_DIR for the children.
+	close_pam_session();
 
 	static struct pam_conv conv = { pam_null_conv, NULL };
 	// class=greeter stops systemd from starting pipewire/dbus/etc. for vos_login.
@@ -213,6 +224,13 @@ init_pam_session()
 	}
 	pam_set_item(sPamHandle, PAM_TTY,   "tty1");
 	pam_set_item(sPamHandle, PAM_RUSER, "root");
+
+	// pam_systemd takes seat/VT from the PAM environment, not our environ.
+	// Without them logind registers a seatless session and
+	// libseat_switch_session() later asserts.
+	pam_putenv(sPamHandle, "XDG_SEAT=seat0");
+	pam_putenv(sPamHandle, "XDG_VTNR=1");
+	pam_putenv(sPamHandle, "XDG_SESSION_TYPE=wayland");
 
 	r = pam_setcred(sPamHandle, PAM_ESTABLISH_CRED);
 	if (r != PAM_SUCCESS) {
@@ -962,6 +980,47 @@ _is_pre_auth_server(const char* name)
 }
 
 
+// Key_map carries its layout identity as an xattr; copying the bytes alone
+// left the preflet guessing from the file name.
+static void
+copy_attributes(int srcFd, int dstFd)
+{
+	ssize_t listSize = flistxattr(srcFd, NULL, 0);
+	if (listSize <= 0)
+		return;
+
+	char* names = (char*)malloc(listSize);
+	if (names == NULL)
+		return;
+
+	listSize = flistxattr(srcFd, names, listSize);
+	if (listSize <= 0) {
+		free(names);
+		return;
+	}
+
+	static const char kPrefix[] = "user.beos.";
+	for (ssize_t i = 0; i < listSize; i += strlen(names + i) + 1) {
+		const char* name = names + i;
+		if (strncmp(name, kPrefix, sizeof(kPrefix) - 1) != 0)
+			continue;
+
+		ssize_t size = fgetxattr(srcFd, name, NULL, 0);
+		if (size < 0)
+			continue;
+
+		char* value = (char*)malloc(size > 0 ? size : 1);
+		if (value == NULL)
+			continue;
+		if (fgetxattr(srcFd, name, value, size) == size)
+			fsetxattr(dstFd, name, value, size, 0);
+		free(value);
+	}
+
+	free(names);
+}
+
+
 // Copy a single settings file from vos_login's config into a target user's
 // config, creating parent dirs and chowning. Silently no-ops if the source
 // doesn't exist (FBP may not have touched every knob).
@@ -998,6 +1057,7 @@ copy_settings_file(const char* srcPath, const char* dstDir,
 		}
 	}
 done:
+	copy_attributes(src, dst);
 	close(src);
 	close(dst);
 	if (chown(dstPath, uid, gid) < 0) { /* best effort */ }
@@ -1021,12 +1081,40 @@ seed_user_settings_from_preauth(const char* userHome, uid_t uid, gid_t gid)
 	if (mkdir(configDir, 0755) < 0 && errno != EEXIST) return;
 	if (chown(configDir, uid, gid) < 0) { /* best effort */ }
 
+	if (mkdir(settingsDir, 0755) < 0 && errno != EEXIST) return;
+	if (chown(settingsDir, uid, gid) < 0) { /* best effort */ }
+
 	static const char* kSrcDir = "/system/login/config/settings";
-	static const char* kFiles[] = { "Locale settings", "Key_map", NULL };
-	for (int i = 0; kFiles[i] != NULL; i++) {
+
+	// Key_map alone is not enough: typed characters come from xkb, which
+	// the add-on picks up from input/layout.
+	static const struct {
+		const char*	subDir;		// relative to settings/, "" for none
+		const char*	name;
+	} kFiles[] = {
+		{ "",		"Locale settings" },
+		{ "",		"Key_map" },
+		{ "input",	"layout" },
+		{ "input",	"xkb_layout" },
+	};
+
+	for (size_t i = 0; i < sizeof(kFiles) / sizeof(kFiles[0]); i++) {
 		char src[PATH_MAX];
-		snprintf(src, sizeof(src), "%s/%s", kSrcDir, kFiles[i]);
-		copy_settings_file(src, settingsDir, kFiles[i], uid, gid);
+		char dstDir[PATH_MAX];
+
+		if (kFiles[i].subDir[0] != '\0') {
+			snprintf(src, sizeof(src), "%s/%s/%s", kSrcDir,
+				kFiles[i].subDir, kFiles[i].name);
+			// Built from userHome, not by appending: two same-sized
+			// buffers make the compiler assume truncation.
+			snprintf(dstDir, sizeof(dstDir), "%s/config/settings/%s",
+				userHome, kFiles[i].subDir);
+		} else {
+			snprintf(src, sizeof(src), "%s/%s", kSrcDir, kFiles[i].name);
+			snprintf(dstDir, sizeof(dstDir), "%s", settingsDir);
+		}
+
+		copy_settings_file(src, dstDir, kFiles[i].name, uid, gid);
 	}
 }
 
@@ -1322,7 +1410,7 @@ kill_post_auth_chain()
 static void*
 pre_auth_thread(void* /*arg*/)
 {
-	// Sentinel present → greeter. Absent → FirstBootPrompt.
+	// Sentinel present -> greeter. Absent -> FirstBootPrompt.
 	const char* frontend =
 		access("/var/lib/vos/first-boot-done", F_OK) == 0
 			? "vitruvian-login"
@@ -1949,37 +2037,10 @@ static struct libseat_seat_listener sSeatListener = {
 };
 
 
-static bool sSeatForking = false;
-static char* sArgvBegin = NULL;
-static size_t sArgvSpan = 0;
-
-
-static void
-seat_fork_child_cb()
-{
-	if (!sSeatForking)
-		return;
-
-	prctl(PR_SET_NAME, "seatd", 0, 0, 0);
-
-	if (sArgvBegin == NULL || sArgvSpan == 0)
-		return;
-
-	memset(sArgvBegin, 0, sArgvSpan);
-	const char name[] = "janus (seatd)";
-	size_t len = sizeof(name) - 1;
-	if (len > sArgvSpan)
-		len = sArgvSpan;
-	memcpy(sArgvBegin, name, len);
-}
-
-
 static bool
 init_seat()
 {
-	sSeatForking = true;
 	sSeat = libseat_open_seat(&sSeatListener, NULL);
-	sSeatForking = false;
 	if (!sSeat) {
 		fprintf(stderr, "janus: libseat_open_seat failed\n");
 		return false;
@@ -2054,12 +2115,6 @@ daemon_loop()
 int
 main(int argc, char** argv)
 {
-	if (argc > 0 && argv[0] != NULL) {
-		sArgvBegin = argv[0];
-		sArgvSpan = argv[argc - 1] + strlen(argv[argc - 1]) + 1 - argv[0];
-	}
-	pthread_atfork(NULL, NULL, seat_fork_child_cb);
-
 	// stdout/stderr are redirected to /var/log/janus.log; unbuffer so
 	// progress lines land in the log immediately, not once the 4 KiB
 	// stdio buffer fills. A frozen log with the process still running

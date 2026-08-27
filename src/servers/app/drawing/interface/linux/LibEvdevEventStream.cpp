@@ -5,8 +5,7 @@
 
 #include "LibEvdevEventStream.h"
 
-#include <Autolock.h>
-#include <View.h>
+#include "LinuxKeycodeMap.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -18,6 +17,8 @@
 #include <algorithm>
 #include <cstring>
 #include <InterfaceDefs.h>
+#include <View.h>
+#include <Autolock.h>
 
 
 template<typename T>
@@ -26,90 +27,90 @@ constexpr const T& clamp_constref(const T& v, const T& lo, const T& hi) {
 }
 
 
-// Key mapping table
 static const struct {
 	uint32 linuxKey;
 	uint32 Bkey;
+	uint32 shifted;
 } kKeyMap[] = {
-	{ KEY_ESC, B_ESCAPE },
-	{ KEY_1, '1' },
-	{ KEY_2, '2' },
-	{ KEY_3, '3' },
-	{ KEY_4, '4' },
-	{ KEY_5, '5' },
-	{ KEY_6, '6' },
-	{ KEY_7, '7' },
-	{ KEY_8, '8' },
-	{ KEY_9, '9' },
-	{ KEY_0, '0' },
-	{ KEY_MINUS, '-' },
-	{ KEY_EQUAL, '=' },
-	{ KEY_BACKSPACE, B_BACKSPACE },
-	{ KEY_TAB, B_TAB },
-	{ KEY_Q, 'q' },
-	{ KEY_W, 'w' },
-	{ KEY_E, 'e' },
-	{ KEY_R, 'r' },
-	{ KEY_T, 't' },
-	{ KEY_Y, 'y' },
-	{ KEY_U, 'u' },
-	{ KEY_I, 'i' },
-	{ KEY_O, 'o' },
-	{ KEY_P, 'p' },
-	{ KEY_LEFTBRACE, '[' },
-	{ KEY_RIGHTBRACE, ']' },
-	{ KEY_ENTER, B_ENTER },
-	{ KEY_A, 'a' },
-	{ KEY_S, 's' },
-	{ KEY_D, 'd' },
-	{ KEY_F, 'f' },
-	{ KEY_G, 'g' },
-	{ KEY_H, 'h' },
-	{ KEY_J, 'j' },
-	{ KEY_K, 'k' },
-	{ KEY_L, 'l' },
-	{ KEY_SEMICOLON, ';' },
-	{ KEY_APOSTROPHE, '\'' },
-	{ KEY_GRAVE, '`' },
-	{ KEY_BACKSLASH, '\\' },
-	{ KEY_Z, 'z' },
-	{ KEY_X, 'x' },
-	{ KEY_C, 'c' },
-	{ KEY_V, 'v' },
-	{ KEY_B, 'b' },
-	{ KEY_N, 'n' },
-	{ KEY_M, 'm' },
-	{ KEY_COMMA, ',' },
-	{ KEY_DOT, '.' },
-	{ KEY_SLASH, '/' },
-	{ KEY_KPASTERISK, '*' },
-	{ KEY_SPACE, B_SPACE },
-	{ KEY_F1, B_F1_KEY },
-	{ KEY_F2, B_F2_KEY },
-	{ KEY_F3, B_F3_KEY },
-	{ KEY_F4, B_F4_KEY },
-	{ KEY_F5, B_F5_KEY },
-	{ KEY_F6, B_F6_KEY },
-	{ KEY_F7, B_F7_KEY },
-	{ KEY_F8, B_F8_KEY },
-	{ KEY_F9, B_F9_KEY },
-	{ KEY_F10, B_F10_KEY },
-	{ KEY_F11, B_F11_KEY },
-	{ KEY_F12, B_F12_KEY },
-	{ KEY_KPMINUS, '-' },
-	{ KEY_KPPLUS, '+' },
-	{ KEY_KPDOT, '.' },
-	{ KEY_102ND, '\\' },
-	{ KEY_HOME, B_HOME },
-	{ KEY_UP, B_UP_ARROW },
-	{ KEY_PAGEUP, B_PAGE_UP },
-	{ KEY_LEFT, B_LEFT_ARROW },
-	{ KEY_RIGHT, B_RIGHT_ARROW },
-	{ KEY_END, B_END },
-	{ KEY_DOWN, B_DOWN_ARROW },
-	{ KEY_PAGEDOWN, B_PAGE_DOWN },
-	{ KEY_INSERT, B_INSERT },
-	{ KEY_DELETE, B_DELETE },
+	{ KEY_ESC, B_ESCAPE, 0 },
+	{ KEY_1, '1', '!' },
+	{ KEY_2, '2', '@' },
+	{ KEY_3, '3', '#' },
+	{ KEY_4, '4', '$' },
+	{ KEY_5, '5', '%' },
+	{ KEY_6, '6', '^' },
+	{ KEY_7, '7', '&' },
+	{ KEY_8, '8', '*' },
+	{ KEY_9, '9', '(' },
+	{ KEY_0, '0', ')' },
+	{ KEY_MINUS, '-', '_' },
+	{ KEY_EQUAL, '=', '+' },
+	{ KEY_BACKSPACE, B_BACKSPACE, 0 },
+	{ KEY_TAB, B_TAB, 0 },
+	{ KEY_Q, 'q', 'Q' },
+	{ KEY_W, 'w', 'W' },
+	{ KEY_E, 'e', 'E' },
+	{ KEY_R, 'r', 'R' },
+	{ KEY_T, 't', 'T' },
+	{ KEY_Y, 'y', 'Y' },
+	{ KEY_U, 'u', 'U' },
+	{ KEY_I, 'i', 'I' },
+	{ KEY_O, 'o', 'O' },
+	{ KEY_P, 'p', 'P' },
+	{ KEY_LEFTBRACE, '[', '{' },
+	{ KEY_RIGHTBRACE, ']', '}' },
+	{ KEY_ENTER, B_ENTER, 0 },
+	{ KEY_A, 'a', 'A' },
+	{ KEY_S, 's', 'S' },
+	{ KEY_D, 'd', 'D' },
+	{ KEY_F, 'f', 'F' },
+	{ KEY_G, 'g', 'G' },
+	{ KEY_H, 'h', 'H' },
+	{ KEY_J, 'j', 'J' },
+	{ KEY_K, 'k', 'K' },
+	{ KEY_L, 'l', 'L' },
+	{ KEY_SEMICOLON, ';', ':' },
+	{ KEY_APOSTROPHE, '\'', '"' },
+	{ KEY_GRAVE, '`', '~' },
+	{ KEY_BACKSLASH, '\\', '|' },
+	{ KEY_Z, 'z', 'Z' },
+	{ KEY_X, 'x', 'X' },
+	{ KEY_C, 'c', 'C' },
+	{ KEY_V, 'v', 'V' },
+	{ KEY_B, 'b', 'B' },
+	{ KEY_N, 'n', 'N' },
+	{ KEY_M, 'm', 'M' },
+	{ KEY_COMMA, ',', '<' },
+	{ KEY_DOT, '.', '>' },
+	{ KEY_SLASH, '/', '?' },
+	{ KEY_KPASTERISK, '*', 0 },
+	{ KEY_SPACE, B_SPACE, 0 },
+	{ KEY_F1, B_FUNCTION_KEY, 0 },
+	{ KEY_F2, B_FUNCTION_KEY, 0 },
+	{ KEY_F3, B_FUNCTION_KEY, 0 },
+	{ KEY_F4, B_FUNCTION_KEY, 0 },
+	{ KEY_F5, B_FUNCTION_KEY, 0 },
+	{ KEY_F6, B_FUNCTION_KEY, 0 },
+	{ KEY_F7, B_FUNCTION_KEY, 0 },
+	{ KEY_F8, B_FUNCTION_KEY, 0 },
+	{ KEY_F9, B_FUNCTION_KEY, 0 },
+	{ KEY_F10, B_FUNCTION_KEY, 0 },
+	{ KEY_F11, B_FUNCTION_KEY, 0 },
+	{ KEY_F12, B_FUNCTION_KEY, 0 },
+	{ KEY_KPMINUS, '-', '_' },
+	{ KEY_KPPLUS, '+', 0 },
+	{ KEY_KPDOT, '.', '>' },
+	{ KEY_102ND, '\\', '|' },
+	{ KEY_HOME, B_HOME, 0 },
+	{ KEY_UP, B_UP_ARROW, 0 },
+	{ KEY_PAGEUP, B_PAGE_UP, 0 },
+	{ KEY_LEFT, B_LEFT_ARROW, 0 },
+	{ KEY_RIGHT, B_RIGHT_ARROW, 0 },
+	{ KEY_END, B_END, 0 },
+	{ KEY_DOWN, B_DOWN_ARROW, 0 },
+	{ KEY_PAGEDOWN, B_PAGE_DOWN, 0 },
+	{ KEY_INSERT, B_INSERT, 0 },
+	{ KEY_DELETE, B_DELETE, 0 },
 };
 
 
@@ -464,19 +465,24 @@ LibEvdevEventStream::_ProcessKeyEvent(EvdevDevice& dev, struct input_event& ev)
 	uint32 keyCode = ev.code;
 	bool pressed = (ev.value != 0);  // 1 = press, 2 = repeat, 0 = release
 
-	int32 bKey = _MapKeyCode(keyCode);
-
 	_UpdateModifiers(keyCode, pressed);
 	uint32 modifiers = _GetCurrentModifiers();
 
+	// "key" is Haiku keycode (not character); "bytes"/"raw_char" are characters
+	int32 haikuKey = linux_to_haiku_keycode(keyCode);
+	if (haikuKey == 0)
+		haikuKey = (int32)keyCode;
+	int32 character = _MapCharacter(keyCode,
+		(modifiers & B_SHIFT_KEY) != 0, fCapsLock);
+
 	if (ev.value == 1) {  // Key press
 		fKeyStates[keyCode] = true;
-		_SendKeyEvent(B_KEY_DOWN, bKey, modifiers);
+		_SendKeyEvent(B_KEY_DOWN, haikuKey, character, modifiers);
 	} else if (ev.value == 0) {  // Key release
 		fKeyStates[keyCode] = false;
-		_SendKeyEvent(B_KEY_UP, bKey, modifiers);
+		_SendKeyEvent(B_KEY_UP, haikuKey, character, modifiers);
 	} else if (ev.value == 2) {  // Key repeat
-		_SendKeyEvent(B_KEY_DOWN, bKey, modifiers);
+		_SendKeyEvent(B_KEY_DOWN, haikuKey, character, modifiers);
 	}
 
 	if (modifiers != fOldModifiers) {
@@ -624,17 +630,19 @@ LibEvdevEventStream::_FlushPendingEvents()
 
 
 void
-LibEvdevEventStream::_SendKeyEvent(uint32 what, int32 key, uint32 modifiers)
+LibEvdevEventStream::_SendKeyEvent(uint32 what, int32 key, int32 character,
+	uint32 modifiers)
 {
 	BMessage* event = new BMessage(what);
 	event->AddInt32("key", key);
-	event->AddInt32("raw_char", key);
+	event->AddInt32("raw_char", character);
 	event->AddInt32("modifiers", modifiers);
 
-	char byte = (char)key;
+	char byte = (char)character;
 	char bytes[2] = {byte, 0};
 	event->AddInt8("byte", (int8)byte);
-	event->AddString("bytes", bytes);
+	if (character != 0)
+		event->AddString("bytes", bytes);
 	event->AddInt64("when", system_time());
 
 	BAutolock lock(fEventListLocker);
@@ -674,13 +682,23 @@ LibEvdevEventStream::_SendMouseEvent(uint32 what)
 
 
 int32
-LibEvdevEventStream::_MapKeyCode(uint32 linuxKeyCode)
+LibEvdevEventStream::_MapCharacter(uint32 linuxKeyCode, bool shift, bool caps)
 {
 	for (size_t i = 0; i < sizeof(kKeyMap) / sizeof(kKeyMap[0]); i++) {
-		if (kKeyMap[i].linuxKey == linuxKeyCode)
-			return kKeyMap[i].Bkey;
+		if (kKeyMap[i].linuxKey != linuxKeyCode)
+			continue;
+
+		uint32 plain = kKeyMap[i].Bkey;
+		bool isLetter = plain >= 'a' && plain <= 'z';
+		// Caps Lock: letters only, Shift: anything with shifted form
+		bool upper = isLetter ? (shift != caps) : shift;
+		if (upper && kKeyMap[i].shifted != 0)
+			return kKeyMap[i].shifted;
+
+		return plain;
 	}
-	return linuxKeyCode;
+
+	return 0;
 }
 
 
@@ -696,29 +714,30 @@ LibEvdevEventStream::_UpdateModifiers(uint32 keyCode, bool pressed)
 			if (pressed) fModifiers |= B_RIGHT_SHIFT_KEY | B_SHIFT_KEY;
 			else fModifiers &= ~(B_RIGHT_SHIFT_KEY | B_SHIFT_KEY);
 			break;
+		// ctrl mode (greeter runs before keymap loads): Ctrl=Command, Alt=Control, Super=Option
 		case KEY_LEFTCTRL:
-			if (pressed) fModifiers |= B_LEFT_CONTROL_KEY | B_CONTROL_KEY;
-			else fModifiers &= ~(B_LEFT_CONTROL_KEY | B_CONTROL_KEY);
+			if (pressed) fModifiers |= B_LEFT_COMMAND_KEY | B_COMMAND_KEY;
+			else fModifiers &= ~(B_LEFT_COMMAND_KEY | B_COMMAND_KEY);
 			break;
 		case KEY_RIGHTCTRL:
-			if (pressed) fModifiers |= B_RIGHT_CONTROL_KEY | B_CONTROL_KEY;
-			else fModifiers &= ~(B_RIGHT_CONTROL_KEY | B_CONTROL_KEY);
+			if (pressed) fModifiers |= B_RIGHT_COMMAND_KEY | B_COMMAND_KEY;
+			else fModifiers &= ~(B_RIGHT_COMMAND_KEY | B_COMMAND_KEY);
 			break;
 		case KEY_LEFTALT:
-			if (pressed) fModifiers |= B_LEFT_OPTION_KEY | B_OPTION_KEY;
-			else fModifiers &= ~(B_LEFT_OPTION_KEY | B_OPTION_KEY);
+			if (pressed) fModifiers |= B_LEFT_CONTROL_KEY | B_CONTROL_KEY;
+			else fModifiers &= ~(B_LEFT_CONTROL_KEY | B_CONTROL_KEY);
 			break;
 		case KEY_RIGHTALT:
 			if (pressed) fModifiers |= B_RIGHT_OPTION_KEY | B_OPTION_KEY;
 			else fModifiers &= ~(B_RIGHT_OPTION_KEY | B_OPTION_KEY);
 			break;
 		case KEY_LEFTMETA:
-			if (pressed) fModifiers |= B_LEFT_COMMAND_KEY | B_COMMAND_KEY;
-			else fModifiers &= ~(B_LEFT_COMMAND_KEY | B_COMMAND_KEY);
+			if (pressed) fModifiers |= B_LEFT_OPTION_KEY | B_OPTION_KEY;
+			else fModifiers &= ~(B_LEFT_OPTION_KEY | B_OPTION_KEY);
 			break;
 		case KEY_RIGHTMETA:
-			if (pressed) fModifiers |= B_RIGHT_COMMAND_KEY | B_COMMAND_KEY;
-			else fModifiers &= ~(B_RIGHT_COMMAND_KEY | B_COMMAND_KEY);
+			if (pressed) fModifiers |= B_RIGHT_OPTION_KEY | B_OPTION_KEY;
+			else fModifiers &= ~(B_RIGHT_OPTION_KEY | B_OPTION_KEY);
 			break;
 		case KEY_CAPSLOCK:
 			if (pressed) {

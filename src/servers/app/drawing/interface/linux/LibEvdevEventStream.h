@@ -66,10 +66,12 @@ private:
 			void				_FlushPendingEvents();
 
 	// Key mapping
-			int32				_MapKeyCode(uint32 linuxKeyCode);
+			int32				_MapCharacter(uint32 linuxKeyCode,
+									bool shift, bool caps);
 			void				_UpdateModifiers(uint32 keyCode, bool pressed);
 			uint32				_GetCurrentModifiers() const;
-			void				_SendKeyEvent(uint32 what, int32 key, uint32 modifiers);
+			void				_SendKeyEvent(uint32 what, int32 key,
+									int32 character, uint32 modifiers);
 			void				_SendMouseEvent(uint32 what);
 
 	// Event list

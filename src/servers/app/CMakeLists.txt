@@ -168,4 +168,5 @@ UsePrivateHeaders(app_server app interface graphics graphics/common kernel suppo
 #TODO: we want a custom target_include_directories that does that:
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -iquote ${PROJECT_SOURCE_DIR}/src/servers/app/")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -iquote ${PROJECT_SOURCE_DIR}/src/servers/app/ \
-	-iquote ${PROJECT_SOURCE_DIR}/src/servers/app/drawing/Painter/bitmap_painter/")
+	-iquote ${PROJECT_SOURCE_DIR}/src/servers/app/drawing/Painter/bitmap_painter/ \
+	-iquote ${PROJECT_SOURCE_DIR}/src/add-ons/input_server/devices/keyboard/")
