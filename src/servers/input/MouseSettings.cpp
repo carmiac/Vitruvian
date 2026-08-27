@@ -1,11 +1,13 @@
 /*
  * Copyright 2004-2009, Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Jérôme Duval
  *		Andrew McCall (mccall@digitalparadise.co.uk)
  *		Axel Dörfler, axeld@pinc-software.de
+ *		Dario Casalinuovo
  */
 
 
@@ -42,6 +44,10 @@ MouseSettings::MouseSettings(const mouse_settings* originalSettings)
 
 		if (MouseType() < 1 || MouseType() > B_MAX_MOUSE_BUTTONS)
 			SetMouseType(kDefaultMouseType);
+		// click_speed <= 0 makes double-clicks permanently impossible;
+		// a garbage-large value makes every click count as one.
+		if (ClickSpeed() <= 0 || ClickSpeed() > kMaxClickSpeed)
+			SetClickSpeed(kDefaultClickSpeed);
 		_EnsureValidMapping();
 	}
 
