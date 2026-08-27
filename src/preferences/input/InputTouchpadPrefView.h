@@ -1,10 +1,12 @@
 /*
  * Copyright 2019-2025, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Preetpal Kaur <preetpalok123@gmail.com>
  *		Samuel Rodríguez Pérez <samuelrp84@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -88,12 +90,13 @@ private:
 
 class TouchpadPrefView : public BGroupView {
 public:
-							TouchpadPrefView(BInputDevice* dev);
+							TouchpadPrefView(BInputDevice* dev,
+								const char* hardwareName);
 	virtual					~TouchpadPrefView();
 	virtual	void			MessageReceived(BMessage* message);
 	virtual	void			AttachedToWindow();
 	virtual	void			DetachedFromWindow();
-			void			SetupView();
+			void			SetupView(const char* hardwareName);
 
 			void			SetValues(touchpad_settings *settings);
 private:

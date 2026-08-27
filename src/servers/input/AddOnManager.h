@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2013, Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -7,6 +8,7 @@
  *		Jérôme Duval
  *		Marcus Overhagen
  *		John Scipione, jscipione@gmail.com
+ *		Dario Casalinuovo
  */
 #ifndef ADD_ON_MANAGER_H
 #define ADD_ON_MANAGER_H
@@ -19,6 +21,8 @@
 #include <Looper.h>
 
 #include <AddOnMonitor.h>
+#include <MessageRunner.h>
+#include <String.h>
 #include <AddOnMonitorHandler.h>
 
 #include <set>
@@ -78,6 +82,10 @@ private:
 			status_t			_HandleMethodReplicant(BMessage* message,
 									BMessage* reply);
 			void				_HandleDeviceMonitor(BMessage* message);
+			void				_RetryPendingDevices();
+			void				_QueueRetry(DeviceAddOn* addOn,
+									const char* watchedPath,
+									const char* path);
 
 			void				_LoadReplicant();
 			void				_UnloadReplicant();
@@ -125,6 +133,18 @@ private:
 
 			BObjectList<DeviceAddOn> fDeviceAddOns;
 			PathList			fDevicePaths;
+
+	// A device node that appeared but could not be opened yet (udev has
+	// not widened its permissions), waiting to be retried.
+	struct pending_device {
+		DeviceAddOn*			add_on;
+		BString					watched_path;
+		BString					path;
+		bigtime_t				give_up_at;
+	};
+
+			BObjectList<pending_device, true> fPendingDevices;
+			BMessageRunner*		fRetryRunner;
 
 			MonitorHandler*		fHandler;
 			std::set<BMessenger> fWatcherMessengerList;

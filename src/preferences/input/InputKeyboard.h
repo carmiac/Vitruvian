@@ -1,5 +1,6 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
@@ -20,7 +21,7 @@
 class InputKeyboard : public BView
 {
 public:
-			InputKeyboard(BInputDevice* dev);
+			InputKeyboard(BInputDevice* dev, const char* hardwareName);
 
 	void	MessageReceived(BMessage* message);
 private:

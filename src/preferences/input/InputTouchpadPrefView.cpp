@@ -1,11 +1,13 @@
 /*
  * Copyright 2019-2025, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Preetpal Kaur <preetpalok123@gmail.com>
  *		Pawan Yerramilli <me@pawanyerramilli.com>
  *		Samuel Rodríguez Pérez <samuelrp84@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -29,6 +31,7 @@
 #include <Path.h>
 #include <Screen.h>
 #include <SeparatorView.h>
+#include <StringView.h>
 #include <SpaceLayoutItem.h>
 #include <Window.h>
 
@@ -264,12 +267,13 @@ TouchpadView::DrawSliders()
 //	#pragma mark - TouchpadPrefView
 
 
-TouchpadPrefView::TouchpadPrefView(BInputDevice* dev)
+TouchpadPrefView::TouchpadPrefView(BInputDevice* dev,
+	const char* hardwareName)
 	:
 	BGroupView(),
 	fTouchpadPref(dev)
 {
-	SetupView();
+	SetupView(hardwareName);
 	// set view values
 	SetValues(&fTouchpadPref.Settings());
 }
@@ -419,8 +423,14 @@ TouchpadPrefView::DetachedFromWindow()
 
 
 void
-TouchpadPrefView::SetupView()
+TouchpadPrefView::SetupView(const char* hardwareName)
 {
+	// The full hardware name; the device list shows a tidied form of it.
+	BStringView* nameView = new BStringView("hardwareName", hardwareName);
+	nameView->SetFont(be_bold_font);
+	nameView->SetAlignment(B_ALIGN_CENTER);
+	nameView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+
 	SetLayout(new BGroupLayout(B_VERTICAL));
 	BBox* scrollBox = new BBox("Touchpad");
 	scrollBox->SetLabel(B_TRANSLATE("Scrolling"));
@@ -552,6 +562,7 @@ TouchpadPrefView::SetupView()
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL)
 		.SetInsets(B_USE_WINDOW_SPACING)
+		.Add(nameView)
 		.Add(scrollBox)
 		.Add(fEdgeMotionOptionPopUp)
 		.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)

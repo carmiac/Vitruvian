@@ -1,18 +1,23 @@
 /*
  * Copyright 2019-2020, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Preetpal Kaur <preetpalok123@gmail.com>
  *		Adrien Destugues <pulkomandy@gmail.com>
+ *		Dario Casalinuovo
  */
 
+
+#include <ctype.h>
 
 #include <CardLayout.h>
 #include <CardView.h>
 #include <Catalog.h>
 #include <Control.h>
 #include <ControlLook.h>
+#include <InputServerDevice.h>
 #include <LayoutBuilder.h>
 #include <ScrollView.h>
 
@@ -118,7 +123,7 @@ InputWindow::MessageReceived(BMessage* message)
 					DeviceListItemView* item
 						= dynamic_cast<DeviceListItemView*>(
 							fDeviceListView->ItemAt(i));
-					if (item != NULL && item->Label() == name) {
+					if (item != NULL && item->DeviceName() == name) {
 						fDeviceListView->RemoveItem(i);
 						BView* settings = fCardView->ChildAt(i);
 						fCardView->RemoveChild(settings);
@@ -178,33 +183,90 @@ InputWindow::FindDevice()
 }
 
 
+// Drops vid:pid token from i2c-HID device names ("ASUE140D:00 04F3:31B9 Mouse" -> "ASUE140D:00 Mouse")
+// ACPI HID stays (distinguishes devices on same controller)
+static BString
+tidy_device_name(const BString& raw)
+{
+	BString result;
+	int32 start = 0;
+
+	while (start < raw.Length()) {
+		int32 end = raw.FindFirst(' ', start);
+		if (end < 0)
+			end = raw.Length();
+
+		BString token;
+		raw.CopyInto(token, start, end - start);
+
+		bool isIdPair = token.Length() == 9 && token[4] == ':';
+		for (int32 i = 0; isIdPair && i < token.Length(); i++) {
+			if (i == 4)
+				continue;
+			if (!isxdigit(token[i]))
+				isIdPair = false;
+		}
+
+		if (!isIdPair && token.Length() > 0) {
+			if (result.Length() > 0)
+				result << ' ';
+			result << token;
+		}
+
+		start = end + 1;
+	}
+
+	return result.Length() > 0 ? result : raw;
+}
+
+
 void
 InputWindow::AddDevice(BInputDevice* dev)
 {
+	// Identity and settings key; never replace with the description.
 	BString name = dev->Name();
 
+	// Display only; falls back to the identity name if the add-on doesn't
+	// implement B_GET_DEVICE_DESCRIPTION.
+	BString hardwareName = name;
+	BMessage description;
+	if (dev->Control(B_GET_DEVICE_DESCRIPTION, &description) == B_OK) {
+		BString reported;
+		if (description.FindString("description", &reported) == B_OK
+			&& !reported.IsEmpty()) {
+			hardwareName = reported;
+		}
+	}
+
+	// The list gets the tidied form; the device's own view shows the full
+	// hardware name at the top.
+	BString displayName = tidy_device_name(hardwareName);
+
 	if (dev->Type() == B_POINTING_DEVICE && name.FindFirst("Touchpad") >= 0) {
-		TouchpadPrefView* view = new TouchpadPrefView(dev);
+		TouchpadPrefView* view = new TouchpadPrefView(dev,
+			hardwareName.String());
 		fCardView->AddChild(view);
 
 		DeviceListItemView* touchpad
-			= new DeviceListItemView(name, TOUCHPAD_TYPE);
+			= new DeviceListItemView(displayName, TOUCHPAD_TYPE, name);
 		fDeviceListView->AddItem(touchpad);
 	} else if (dev->Type() == B_POINTING_DEVICE) {
 		MouseSettings* settings;
 		settings = fMultipleMouseSettings.AddMouseSettings(name);
 
-		InputMouse* view = new InputMouse(dev, settings);
+		InputMouse* view = new InputMouse(dev, settings,
+			hardwareName.String());
 		fCardView->AddChild(view);
 
-		DeviceListItemView* mouse = new DeviceListItemView(name, MOUSE_TYPE);
+		DeviceListItemView* mouse
+			= new DeviceListItemView(displayName, MOUSE_TYPE, name);
 		fDeviceListView->AddItem(mouse);
 	} else if (dev->Type() == B_KEYBOARD_DEVICE) {
-		InputKeyboard* view = new InputKeyboard(dev);
+		InputKeyboard* view = new InputKeyboard(dev, hardwareName.String());
 		fCardView->AddChild(view);
 
 		DeviceListItemView* keyboard
-			= new DeviceListItemView(name, KEYBOARD_TYPE);
+			= new DeviceListItemView(displayName, KEYBOARD_TYPE, name);
 		fDeviceListView->AddItem(keyboard);
 	} else
 		delete dev;

@@ -1,9 +1,11 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
  *		Preetpal Kaur <preetpalok123@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -23,10 +25,12 @@
 InputIcons* DeviceListItemView::sIcons = NULL;
 
 
-DeviceListItemView::DeviceListItemView(BString title, input_type type)
+DeviceListItemView::DeviceListItemView(BString title, input_type type,
+	BString identity)
 	:
 	BListItem((uint32)0),
 	fTitle(title),
+	fIdentity(identity.IsEmpty() ? title : identity),
 	fInputType(type)
 {
 }

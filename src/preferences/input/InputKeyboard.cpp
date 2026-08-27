@@ -1,9 +1,11 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
  *		Preetpal Kaur <preetpalok123@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -13,6 +15,7 @@
 #include <Button.h>
 #include <Catalog.h>
 #include <LayoutBuilder.h>
+#include <StringView.h>
 #include <Locale.h>
 #include <Message.h>
 #include <SeparatorView.h>
@@ -26,10 +29,16 @@
 #define B_TRANSLATION_CONTEXT "InputKeyboard"
 
 
-InputKeyboard::InputKeyboard(BInputDevice* dev)
+InputKeyboard::InputKeyboard(BInputDevice* dev, const char* hardwareName)
 	:
 	BView("InputKeyboard", B_WILL_DRAW)
 {
+	// The full hardware name; the device list shows a tidied form of it.
+	BStringView* nameView = new BStringView("hardwareName", hardwareName);
+	nameView->SetFont(be_bold_font);
+	nameView->SetAlignment(B_ALIGN_CENTER);
+	nameView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+
 	// Add the main settings view
 	fSettingsView = new KeyboardView();
 
@@ -47,6 +56,10 @@ InputKeyboard::InputKeyboard(BInputDevice* dev)
 		.AddGroup(B_HORIZONTAL)
 			.SetInsets(B_USE_WINDOW_SPACING, B_USE_WINDOW_SPACING,
 				B_USE_WINDOW_SPACING, 0)
+			.Add(nameView)
+			.End()
+		.AddGroup(B_HORIZONTAL)
+			.SetInsets(B_USE_WINDOW_SPACING, 0, B_USE_WINDOW_SPACING, 0)
 			.Add(fSettingsView)
 			.End()
 		.Add(new BSeparatorView(B_HORIZONTAL))

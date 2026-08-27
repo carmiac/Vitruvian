@@ -1,5 +1,6 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
@@ -27,7 +28,8 @@ class DeviceListView;
 
 class InputMouse : public BView {
 public:
-					InputMouse(BInputDevice* dev, MouseSettings* settings);
+					InputMouse(BInputDevice* dev, MouseSettings* settings,
+						const char* hardwareName);
 	virtual			~InputMouse();
 	void			SetMouseType(int32 type);
 	void			MessageReceived(BMessage* message);

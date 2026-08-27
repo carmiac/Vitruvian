@@ -1,9 +1,11 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
  *		Preetpal Kaur <preetpalok123@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -17,6 +19,7 @@
 #include <LayoutBuilder.h>
 #include <Locale.h>
 #include <SeparatorView.h>
+#include <StringView.h>
 
 #include "InputConstants.h"
 #include "MouseSettings.h"
@@ -26,7 +29,8 @@
 #define B_TRANSLATION_CONTEXT "InputMouse"
 
 
-InputMouse::InputMouse(BInputDevice* dev, MouseSettings* settings)
+InputMouse::InputMouse(BInputDevice* dev, MouseSettings* settings,
+	const char* hardwareName)
 	:
 	BView("InputMouse", B_WILL_DRAW)
 {
@@ -42,7 +46,14 @@ InputMouse::InputMouse(BInputDevice* dev, MouseSettings* settings)
 		new BMessage(kMsgRevert));
 	fRevertButton->SetEnabled(false);
 
+	// The full hardware name; the device list shows a tidied form of it.
+	BStringView* nameView = new BStringView("hardwareName", hardwareName);
+	nameView->SetFont(be_bold_font);
+	nameView->SetAlignment(B_ALIGN_CENTER);
+	nameView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+
 	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
+		.Add(nameView)
 		.Add(fSettingsView)
 			.Add(new BSeparatorView(B_HORIZONTAL))
 				.AddGroup(B_HORIZONTAL)

@@ -1,5 +1,6 @@
 /*
  * Copyright 2008, Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  */
 #ifndef _INPUTSERVERDEVICE_H
@@ -33,6 +34,9 @@ enum {
 	B_CLICK_SPEED_CHANGED,
 	B_MOUSE_ACCELERATION_CHANGED,
 	B_SET_TOUCHPAD_SETTINGS,
+
+	// Control() query: hardware name (distinct from identity/settings key)
+	B_GET_DEVICE_DESCRIPTION,
 };
 
 namespace BPrivate {

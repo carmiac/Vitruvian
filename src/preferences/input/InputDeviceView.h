@@ -1,9 +1,11 @@
 /*
  * Copyright 2019, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Author:
  *		Preetpal Kaur <preetpalok123@gmail.com>
+ *		Dario Casalinuovo
  */
 
 
@@ -30,13 +32,18 @@ enum input_type {
 
 class DeviceListItemView : public BListItem {
 public:
-						DeviceListItemView(BString title, input_type type);
+						// identity must stay device_ref.name (matched
+						// against B_INPUT_DEVICE_REMOVED); title is
+						// display only, defaults to identity when omitted.
+						DeviceListItemView(BString title, input_type type,
+							BString identity = BString());
 
 	void				Update(BView* owner, const BFont* font);
 	void				DrawItem(BView* owner, BRect frame,
 						bool complete = false);
 
 	const char*			Label() { return fTitle.String();}
+	const char*			DeviceName() { return fIdentity.String();}
 
 
 	static	InputIcons*	Icons() { return sIcons; }
@@ -50,6 +57,7 @@ protected:
 private:
 	static InputIcons*	sIcons;
 	BString				fTitle;
+	BString				fIdentity;
 	input_type			fInputType;
 };
 
