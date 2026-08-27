@@ -53,6 +53,9 @@ AddOn(
 	Variant.cpp
 	WeakReferenceable.cpp
 	md5.cpp
+
+	INCLUDES
+	"${PROJECT_SOURCE_DIR}/src/add-ons/input_server/devices/keyboard"
 )
 
 UsePrivateHeaders(shared shared locale interface kernel libroot system)

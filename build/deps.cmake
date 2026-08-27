@@ -74,6 +74,11 @@ DeclareDependency(
 )
 
 DeclareDependency(
+	XKEYBOARD_CONFIG
+	RUNTIMES	"xkb-data"
+)
+
+DeclareDependency(
 	NOTO
 	RUNTIMES	"fonts-noto-core;fonts-noto-extra;fonts-noto-mono"
 )

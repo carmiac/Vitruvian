@@ -36,6 +36,8 @@
 #include <stdio.h>
 #include <strings.h>
 
+#include <Keymap.h>
+
 #include "SystemKeymap.h"
 	// this is an automatically generated file
 
@@ -280,13 +282,26 @@ status_t
 InputServer::_LoadSystemKeymap()
 {
 	delete[] fChars;
-	fKeys = kSystemKeymap;
-	fCharsSize = kSystemKeyCharsSize;
-	fChars = new (nothrow) char[fCharsSize];
-	if (fChars == NULL)
-		return B_NO_MEMORY;
+	fChars = NULL;
 
-	memcpy(fChars, kSystemKeyChars, fCharsSize);
+	// Prefer a keymap derived live from xkbcommon over kSystemKeymap, the
+	// frozen build-time US fallback.
+	BKeymap keymap;
+	if (keymap.PopulateFromXkbNames(NULL, NULL, NULL, NULL, NULL) == B_OK) {
+		fKeys = keymap.Map();
+		fCharsSize = keymap.CharsSize();
+		fChars = new (nothrow) char[fCharsSize];
+		if (fChars == NULL)
+			return B_NO_MEMORY;
+		memcpy(fChars, keymap.Chars(), fCharsSize);
+	} else {
+		fKeys = kSystemKeymap;
+		fCharsSize = kSystemKeyCharsSize;
+		fChars = new (nothrow) char[fCharsSize];
+		if (fChars == NULL)
+			return B_NO_MEMORY;
+		memcpy(fChars, kSystemKeyChars, fCharsSize);
+	}
 
 	// TODO: why are we doing this?
 	return _SaveKeymap(true);
@@ -595,7 +610,7 @@ InputServer::MessageReceived(BMessage* message)
 			// (fAppServerPort >= 0). The race: ReadyToRun sends
 			// AS_REGISTER_INPUT_SERVER and sets fRegistrationPending, but
 			// _ASt can arrive before IS_ACQUIRE_INPUT comes back — if we
-			// re-send here, we get two IS_ACQUIRE_INPUT → two ports → the
+			// re-send here, we get two IS_ACQUIRE_INPUT -> two ports -> the
 			// EventDispatcher blocks on the first port while input_server
 			// writes to the second.
 			if (!fRegistrationPending && fAppServerPort < 0) {
@@ -1664,8 +1679,9 @@ InputServer::_UpdateMouseAndKeys(EventList& events)
 				// If there is only one input method, SetNextMethod will return
 				// B_BAD_INDEX and the event will be forwarded to the user.
 
+				// key_states is Haiku-indexed; KEY_Spacebar was an evdev code.
 				PRINT(("SanitizeEvents: %" B_PRIx32 ", %x\n", fKeyInfo.modifiers,
-					fKeyInfo.key_states[KEY_Spacebar >> 3]));
+					fKeyInfo.key_states[B_SPACE_BAR_KEY >> 3]));
 
 				uint8 byte;
 				if (event->FindInt8("byte", (int8*)&byte) < B_OK)
