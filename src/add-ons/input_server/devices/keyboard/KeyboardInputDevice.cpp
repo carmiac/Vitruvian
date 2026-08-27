@@ -14,6 +14,8 @@
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <Application.h>
@@ -31,13 +33,18 @@
 #include <sys/epoll.h>
 #include <linux/vt.h>
 #include "../LinuxEvdevShim.h"
+#include "LinuxKeycodeMap.h"
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-names.h>
 #include <xkbcommon/xkbcommon-compose.h>
 #include <AppDefs.h>
 #include <private/app/LaunchDaemonDefs.h>
 #include <private/app/RegistrarDefs.h>
 #include <private/kernel/util/KMessage.h>
 
+
+#define SETTING_BIT(opcode)	((uint32)1 << (opcode))
+#define SETTING_ALL			SETTING_BIT(0)
 
 
 #undef TRACE
@@ -66,14 +73,26 @@ static	int32		sFunctionDepth = -1;
 #endif
 
 
-const static uint32 kKeyboardThreadPriority = B_FIRST_REAL_TIME_PRIORITY + 4;
-const static char* kKeyboardDevicesDirectory = "/dev/input";
+	const static uint32 kKeyboardThreadPriority = B_FIRST_REAL_TIME_PRIORITY + 4;
+ const static char* kKeyboardDevicesDirectory = "/dev/input";
+
+static int32 sNextKeyboardDeviceSerial = 0;
 
 
 extern "C" BInputServerDevice*
 instantiate_input_device()
 {
 	return new(std::nothrow) KeyboardInputDevice();
+}
+
+
+static int32
+device_index_from_name(const BString& name)
+{
+	const char* digits = name.String();
+	digits += strcspn(digits, "0123456789");
+
+	return *digits != '\0' ? atoi(digits) : 0;
 }
 
 
@@ -85,12 +104,12 @@ get_short_name(const char* longName)
 
 	int32 slash = string.FindLast("/");
 	string.CopyInto(name, slash + 1, string.Length() - slash);
-	int32 index = atoi(name.String()) + 1;
+	int32 index = device_index_from_name(name) + 1;
 
 	int32 previousSlash = string.FindLast("/", slash);
 	string.CopyInto(name, previousSlash + 1, slash - previousSlash - 1);
 
-	// some special handling so that we get "USB" and "AT" instead of "usb"/"at"
+	// Format: "USB" instead of "usb"
 	if (name.Length() < 4)
 		name.ToUpper();
 	else
@@ -110,6 +129,7 @@ KeyboardDevice::KeyboardDevice(KeyboardInputDevice* owner, const char* path)
 	BHandler("keyboard device"),
 	fOwner(owner),
 	fFD(-1),
+	fSerial(atomic_add(&sNextKeyboardDeviceSerial, 1)),
 	fInputHandle(NULL),
 	fEpollFd(-1),
 	fXkbContext(NULL),
@@ -120,8 +140,10 @@ KeyboardDevice::KeyboardDevice(KeyboardInputDevice* owner, const char* path)
 	fThread(-1),
 	fActive(false),
 	fInputMethodStarted(false),
+	fModifiers(0),
+	fCommandKey(0),
+	fControlKey(0),
 	fKeyboardID(0),
-	fUpdateSettings(false),
 	fSettingsCommand(0),
 	fKeymapLock("keymap lock")
 {
@@ -168,23 +190,8 @@ KeyboardDevice::MessageReceived(BMessage* message)
 
 	switch (message->what) {
 		case B_SEAT_ENABLED:
-		{
-			uint8 leds[LED_MAX / 8 + 1] = {};
-			if (ioctl(fFD, EVIOCGLED(sizeof(leds)), leds) >= 0) {
-				static const struct { uint32_t ledBit; xkb_keycode_t xkbCode; } kLeds[] = {
-					{ LED_CAPSL,   58 + 8 },
-					{ LED_NUML,    69 + 8 },
-					{ LED_SCROLLL, 70 + 8 },
-				};
-				for (auto& led : kLeds) {
-					if (leds[led.ledBit / 8] & (1 << (led.ledBit % 8))) {
-						xkb_state_update_key(fXkbState, led.xkbCode, XKB_KEY_DOWN);
-						xkb_state_update_key(fXkbState, led.xkbCode, XKB_KEY_UP);
-					}
-				}
-			}
+			_SyncLocksFromLEDs();
 			break;
-		}
 
 		case B_INPUT_METHOD_EVENT:
 		{
@@ -215,13 +222,13 @@ KeyboardDevice::Start()
 			close(fFD);
 			fFD = -1;
 		} else {
-			// No EVIOCGRAB: input_server add-ons are the sole input path;
-			// libevdev reads directly from /dev/input/eventN.
+			BAutolock lock(fKeymapLock);
+			fKeymap.RetrieveCurrent();
 			_RebuildXkb();
 		}
 	}
 	if (fFD < 0) {
-		// let the control thread handle any error on opening the device
+		// Control thread handles device open errors
 		fFD = errno > 0 ? -errno : -1;
 	}
 
@@ -274,10 +281,17 @@ KeyboardDevice::Stop()
 	}
 
 	if (fThread >= 0) {
-		suspend_thread(fThread);
-		resume_thread(fThread);
-		status_t dummy;
-		wait_for_thread(fThread, &dummy);
+		if (find_thread(NULL) == fThread) {
+			// Stop() reached via this control thread's own cleanup path
+			// (self removal through fOwner->_RemoveDevice()); joining
+			// ourselves here would deadlock forever, and the thread is
+			// already unwinding back to its own return statement.
+		} else {
+			suspend_thread(fThread);
+			resume_thread(fThread);
+			status_t dummy;
+			wait_for_thread(fThread, &dummy);
+		}
 	}
 }
 
@@ -290,33 +304,35 @@ KeyboardDevice::UpdateSettings(uint32 opcode)
 	if (fThread < 0)
 		return B_ERROR;
 
-	// schedule updating the settings from within the control thread
-	fSettingsCommand = opcode;
-	fUpdateSettings = true;
+	atomic_set(&fSettingsCommand, (int32)opcode);
 
 	return B_OK;
+}
+
+
+status_t
+KeyboardDevice::GetDescription(BMessage* message) const
+{
+	if (message == NULL)
+		return B_BAD_VALUE;
+
+	if (fDescription.IsEmpty())
+		return B_NAME_NOT_FOUND;
+
+	return message->AddString("description", fDescription.String());
 }
 
 
 // #pragma mark - control thread
 
 
-// ---------------------------------------------------------------------------
-// evdev keycode → Haiku special character table
-// For keys that xkb_state_key_get_utf8 returns nothing for (arrow keys,
-// navigation keys, function keys, system keys) but Haiku apps expect a
-// specific byte value in the B_KEY_DOWN message's "bytes" field.
-// haikuByte1 != 0 means two bytes are produced (used for F-keys:
-//   bytes[0] = B_FUNCTION_KEY, bytes[1] = B_FN_KEY constant).
-// ---------------------------------------------------------------------------
+// evdev -> Haiku key mapping for non-UTF8 keys (xkbcommon provides no UTF8 for nav/function keys)
+// For F-keys and system keys: byte0 = B_FUNCTION_KEY, byte1 = B_FN_KEY constant
 
 struct EvdevHaikuChar { uint32 code; uint8 byte0; uint8 byte1; };
 
 static const EvdevHaikuChar kSpecialKeys[] = {
-	// Control characters — xkb_state_key_get_utf8 skips the 0x01–0x1f range
-	// on some xkbcommon versions/configurations, so we provide them here as a
-	// guaranteed fallback.  Without these, Enter/Tab/Backspace/Escape arrive as
-	// B_UNMAPPED_KEY_DOWN and are silently ignored by BTextView and friends.
+	// Control chars (xkbcommon skips 0x01–0x1f)
 	{ KEY_ESC,        B_ESCAPE,      0 },
 	{ KEY_BACKSPACE,  B_BACKSPACE,   0 },
 	{ KEY_TAB,        B_TAB,         0 },
@@ -327,14 +343,25 @@ static const EvdevHaikuChar kSpecialKeys[] = {
 	{ KEY_DOWN,      B_DOWN_ARROW,  0 },
 	{ KEY_LEFT,      B_LEFT_ARROW,  0 },
 	{ KEY_RIGHT,     B_RIGHT_ARROW, 0 },
-	// Navigation cluster
+	// Navigation
 	{ KEY_HOME,      B_HOME,        0 },
 	{ KEY_END,       B_END,         0 },
 	{ KEY_INSERT,    B_INSERT,      0 },
 	{ KEY_DELETE,    B_DELETE,      0 },
 	{ KEY_PAGEUP,    B_PAGE_UP,     0 },
 	{ KEY_PAGEDOWN,  B_PAGE_DOWN,   0 },
-	// Function keys: byte0 = B_FUNCTION_KEY, byte1 = B_Fn_KEY
+	// Keypad navigation
+	{ KEY_KP7,       B_HOME,        0 },
+	{ KEY_KP8,       B_UP_ARROW,    0 },
+	{ KEY_KP9,       B_PAGE_UP,     0 },
+	{ KEY_KP4,       B_LEFT_ARROW,  0 },
+	{ KEY_KP6,       B_RIGHT_ARROW, 0 },
+	{ KEY_KP1,       B_END,         0 },
+	{ KEY_KP2,       B_DOWN_ARROW,  0 },
+	{ KEY_KP3,       B_PAGE_DOWN,   0 },
+	{ KEY_KP0,       B_INSERT,      0 },
+	{ KEY_KPDOT,     B_DELETE,      0 },
+	// Function keys (byte0 = B_FUNCTION_KEY, byte1 = B_Fn_KEY)
 	{ KEY_F1,  B_FUNCTION_KEY, B_F1_KEY  },
 	{ KEY_F2,  B_FUNCTION_KEY, B_F2_KEY  },
 	{ KEY_F3,  B_FUNCTION_KEY, B_F3_KEY  },
@@ -359,7 +386,7 @@ static const EvdevHaikuChar kSpecialKeys[] = {
 	{ KEY_F22, B_FUNCTION_KEY, B_F22_KEY },
 	{ KEY_F23, B_FUNCTION_KEY, B_F23_KEY },
 	{ KEY_F24, B_FUNCTION_KEY, B_F24_KEY },
-	// System keys — same two-byte format as F-keys
+	// System keys
 	{ KEY_SYSRQ,      B_FUNCTION_KEY, B_PRINT_KEY  },
 	{ KEY_SCROLLLOCK, B_FUNCTION_KEY, B_SCROLL_KEY },
 	{ KEY_PAUSE,      B_FUNCTION_KEY, B_PAUSE_KEY  },
@@ -392,7 +419,7 @@ KeyboardDevice::_ControlThread()
 	if (fXkbState == NULL)
 		return B_ERROR;
 
-	_UpdateSettings(0);
+	_UpdateSettings(SETTING_BIT(0));
 
 	fEpollFd = epoll_create1(0);
 	if (fEpollFd < 0) {
@@ -404,7 +431,7 @@ KeyboardDevice::_ControlThread()
 	epev.data.fd = fFD;
 	epoll_ctl(fEpollFd, EPOLL_CTL_ADD, fFD, &epev);
 
-	// Phase 2: keyboard ID via EVIOCGID
+	// Get keyboard ID via EVIOCGID
 	if (fKeyboardID == 0) {
 		struct input_id evid;
 		if (ioctl(fFD, EVIOCGID, &evid) == 0) {
@@ -415,30 +442,7 @@ KeyboardDevice::_ControlThread()
 		}
 	}
 
-	// Phase 3: sync xkb state from current LED state (CapsLock/NumLock/ScrollLock)
-	{
-		uint8 leds[LED_MAX / 8 + 1] = {};
-		if (ioctl(fFD, EVIOCGLED(sizeof(leds)), leds) >= 0) {
-			// LED_CAPSLOCK = 0x01, LED_NUML = 0x00, LED_SCROLLL = 0x02
-			// xkb keycodes for lock keys looked up dynamically by name
-			// Simulate press+release to set the lock state in xkb
-			xkb_keycode_t capsCode   = xkb_keymap_key_by_name(fXkbKeymap, "CAPS");
-			xkb_keycode_t numCode    = xkb_keymap_key_by_name(fXkbKeymap, "NMLK");
-			xkb_keycode_t scrollCode = xkb_keymap_key_by_name(fXkbKeymap, "SCLK");
-			
-			auto syncLock = [&](uint32_t ledBit, xkb_keycode_t xkbKey) {
-				if (leds[ledBit / 8] & (1 << (ledBit % 8))) {
-					xkb_state_update_key(fXkbState, xkbKey, XKB_KEY_DOWN);
-					xkb_state_update_key(fXkbState, xkbKey, XKB_KEY_UP);
-				}
-			};
-			syncLock(LED_CAPSL, capsCode);
-			syncLock(LED_NUML,  numCode);
-			syncLock(LED_SCROLLL, scrollCode);
-		}
-	}
-
-	// /dev/tty0 is root-only, so VT_GETSTATE isn't reachable from here.
+	// Check for real VT (VT_GETSTATE requires root)
 	bool hasRealVT = false;
 	FILE* vtFile = fopen("/sys/class/tty/tty0/active", "r");
 	if (vtFile != NULL) {
@@ -465,6 +469,8 @@ KeyboardDevice::_ControlThread()
 	bool vtLCtrl = false, vtRCtrl = false;
 	bool vtAlt = false, vtRalt = false;
 	bool menuKeyDown = false;
+	// Swallow VT switch key release (lands on target VT)
+	uint32 vtSwallowKey = 0;
 
 	raw_key_info keyInfo;
 	uint32 lastKeyCode = 0;
@@ -474,32 +480,34 @@ KeyboardDevice::_ControlThread()
 
 	memset(states, 0, sizeof(states));
 
-	while (fActive) {
-		// Update the settings from this thread if necessary
-		if (fUpdateSettings) {
-			_UpdateSettings(fSettingsCommand);
-			fUpdateSettings = false;
-		}
+	const uint32 kHaikuLeftShift  = linux_to_haiku_keycode(KEY_LEFTSHIFT);
+	const uint32 kHaikuRightShift = linux_to_haiku_keycode(KEY_RIGHTSHIFT);
+	// Roles come from keymap, not fixed keys; ctrl-mode swaps them
 
+	while (fActive) {
+		uint32 pending = (uint32)atomic_get_and_set(&fSettingsCommand, 0);
+		if (pending != 0)
+			_UpdateSettings(pending);
+
+		// Drain libevdev queue before epoll wait (prevents lost key-up events)
 		struct epoll_event fired;
-		if (epoll_wait(fEpollFd, &fired, 1, 100) <= 0) {
-			/* Timeout: reconcile shadow state with the kernel's actual key
-			 * state via EVIOCGKEY. Recovers from any dropped EV_KEY UP event
-			 * (QEMU input grabs, libevdev/libinput drops, focus changes). */
+		if (libevdev_has_event_pending(fInputHandle) <= 0
+			&& epoll_wait(fEpollFd, &fired, 1, 100) <= 0) {
+			// Reconcile shadow state with kernel via EVIOCGKEY (recovers dropped UP events)
 #ifndef EVIOCGKEY
 #define EVIOCGKEY(len) _IOC(_IOC_READ, 'E', 0x18, len)
 #endif
 			if (fFD < 0)
 				continue;
-			/* 128 bytes = 1024 bits — covers all standard keys (KEY_MAX ≤ 767). */
+			// 128 bytes = 1024 bits (KEY_MAX ≤ 767)
 			uint8_t keyBits[128] = {};
-			if (ioctl(fFD, EVIOCGKEY(128), keyBits) != 0)
+			if (ioctl(fFD, EVIOCGKEY(128), keyBits) < 0)
 				continue;
 
 #define _HWBIT(c) ((keyBits[(c) >> 3] >> ((c) & 7)) & 1)
 #define _SHBIT(c) (states[(c) >> 3] & (1 << (7 - ((c) & 7))))
 
-			// Ctrl+Alt+Del recovery (preserved from previous behavior).
+			// Ctrl+Alt+Del recovery
 			if (ctrlAltDelPressed) {
 				bool delHeld  = _HWBIT(111);
 				bool ctrlHeld = _HWBIT(29) || _HWBIT(97);
@@ -514,17 +522,19 @@ KeyboardDevice::_ControlThread()
 				}
 			}
 
-			// Generalized reconciliation: any key the shadow thinks is down
-			// but the hardware reports up gets a synthetic release.
+			// Reconcile: release keys shadow thinks are down but hardware reports up
 			bool anyRepaired = false;
 			for (uint32 k = 1; k < 128; k++) {
-				if (!_SHBIT(k) || _HWBIT(k))
+				uint32 haiku = linux_to_haiku_keycode(k);
+				if (haiku == 0 || haiku >= 128)
+					continue;
+				if (!_SHBIT(haiku) || _HWBIT(k))
 					continue;
 				if (!anyRepaired) {
 					fKeymapLock.Lock();
 					anyRepaired = true;
 				}
-				states[k >> 3] &= ~(1 << (7 - (k & 7)));
+				states[haiku >> 3] &= ~(1 << (7 - (haiku & 7)));
 				xkb_state_update_key(fXkbState, k + 8, XKB_KEY_UP);
 
 				if (k == KEY_LEFTCTRL)       vtLCtrl = false;
@@ -536,7 +546,7 @@ KeyboardDevice::_ControlThread()
 				BMessage* upMsg = new(std::nothrow) BMessage(B_UNMAPPED_KEY_UP);
 				if (upMsg != NULL) {
 					upMsg->AddInt64("when", system_time());
-					upMsg->AddInt32("key", k);
+					upMsg->AddInt32("key", haiku);
 					upMsg->AddInt32("modifiers", fModifiers);
 					upMsg->AddData("states", B_UINT8_TYPE, states, 16);
 					if (fOwner->EnqueueMessage(upMsg) != B_OK)
@@ -549,29 +559,29 @@ KeyboardDevice::_ControlThread()
 				uint32 newModifiers = 0;
 #define _KBIT(c) (states[(c) >> 3] & (1 << (7 - ((c) & 7))))
 				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_SHIFT,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_SHIFT_KEY;
-				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CTRL,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_CONTROL_KEY;
-				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_ALT,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_COMMAND_KEY;
-				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_LOGO,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_OPTION_KEY;
+						XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_SHIFT_KEY;
 				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CAPS,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_CAPS_LOCK;
+						XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_CAPS_LOCK;
 				if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_NUM,
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_NUM_LOCK;
-				if (xkb_state_mod_name_is_active(fXkbState, "Scroll_Lock",
-						XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_SCROLL_LOCK;
+						XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_NUM_LOCK;
+				if (xkb_state_led_name_is_active(fXkbState,
+						XKB_LED_NAME_SCROLL) > 0) newModifiers |= B_SCROLL_LOCK;
 				if (menuKeyDown) newModifiers |= B_MENU_KEY;
-				if (_KBIT(42))  newModifiers |= B_LEFT_SHIFT_KEY;
-				if (_KBIT(54))  newModifiers |= B_RIGHT_SHIFT_KEY;
-				if (_KBIT(29))  newModifiers |= B_LEFT_CONTROL_KEY;
-				if (_KBIT(97))  newModifiers |= B_RIGHT_CONTROL_KEY;
-				if (_KBIT(56))  newModifiers |= B_LEFT_COMMAND_KEY;
-				if (_KBIT(100) && (newModifiers & B_COMMAND_KEY))
-					newModifiers |= B_RIGHT_COMMAND_KEY;
-				if (_KBIT(125)) newModifiers |= B_LEFT_OPTION_KEY;
-				if (_KBIT(126)) newModifiers |= B_RIGHT_OPTION_KEY;
+				if (_KBIT(kHaikuLeftShift))  newModifiers |= B_LEFT_SHIFT_KEY;
+				if (_KBIT(kHaikuRightShift))  newModifiers |= B_RIGHT_SHIFT_KEY;
+				const key_map& map = fKeymap.Map();
+				if (_KBIT(map.left_control_key))  newModifiers |= B_LEFT_CONTROL_KEY;
+				if (_KBIT(map.right_control_key))  newModifiers |= B_RIGHT_CONTROL_KEY;
+				if (_KBIT(map.left_command_key))  newModifiers |= B_LEFT_COMMAND_KEY;
+				if (_KBIT(map.right_command_key))  newModifiers |= B_RIGHT_COMMAND_KEY;
+				if (_KBIT(map.left_option_key)) newModifiers |= B_LEFT_OPTION_KEY;
+				if (_KBIT(map.right_option_key)) newModifiers |= B_RIGHT_OPTION_KEY;
+				if (newModifiers & (B_LEFT_CONTROL_KEY | B_RIGHT_CONTROL_KEY))
+					newModifiers |= B_CONTROL_KEY;
+				if (newModifiers & (B_LEFT_COMMAND_KEY | B_RIGHT_COMMAND_KEY))
+					newModifiers |= B_COMMAND_KEY;
+				if (newModifiers & (B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY))
+					newModifiers |= B_OPTION_KEY;
 #undef _KBIT
 				fModifiers = newModifiers;
 				if (fModifiers != oldModifiers) {
@@ -629,14 +639,19 @@ KeyboardDevice::_ControlThread()
 		uint32 keycode = keyInfo.keycode;  // raw evdev code
 		bool isKeyDown = keyInfo.is_keydown;
 
-		// Track raw modifier state for VT switching and Menu key (independent of keymap)
+		// Track raw modifiers for VT switching and Menu key (keymap-independent)
 		if (ev.code == KEY_LEFTCTRL)       vtLCtrl   = isKeyDown;
 		else if (ev.code == KEY_RIGHTCTRL) vtRCtrl   = isKeyDown;
 		else if (ev.code == KEY_LEFTALT)   vtAlt     = isKeyDown;
 		else if (ev.code == KEY_RIGHTALT)  vtRalt    = isKeyDown;
 		else if (ev.code == KEY_Menu)      menuKeyDown = isKeyDown;
 
-		// VT switch: Ctrl+Alt+Fn (native) or Alt+Fn (VM, left alt only)
+		if (!isKeyDown && ev.code == vtSwallowKey) {
+			vtSwallowKey = 0;
+			continue;
+		}
+
+		// VT switch: Ctrl+Alt+Fn (native) or Alt+Fn (VM)
 		if (hasRealVT && isKeyDown) {
 			uint32 fn = 0;
 			if (ev.code >= KEY_F1 && ev.code <= KEY_F10)
@@ -654,18 +669,21 @@ KeyboardDevice::_ControlThread()
 					if (janusPort >= 0) {
 						BPrivate::KMessage msg(BPrivate::B_JANUS_SWITCH_VT);
 						msg.AddInt32("vt", (int32)fn);
-						// No reply: waiting would stall the evdev loop.
+						// No reply (would stall evdev loop)
 						msg.SendTo(janusPort, -1, (BPrivate::KMessage*)NULL);
 					} else {
-						fprintf(stderr, "KeyboardInputDevice: janus port not "
-							"found; can't switch VT\n");
+						fprintf(stderr, "KeyboardInputDevice: janus port not found; can't switch VT\n");
 					}
+
+					// Clear modifier latches (releases go to target VT)
+					vtLCtrl = vtRCtrl = vtAlt = vtRalt = false;
+					vtSwallowKey = ev.code;
 					continue;
 				}
 			}
 		}
 
-		// Power management keys — send shutdown/reboot to registrar on key release.
+		// Power management: send shutdown/reboot to registrar on release
 		if (!isKeyDown) {
 			bool isShutdown = (ev.code == KEY_POWER);
 			bool isReboot   = (ev.code == KEY_RESTART);
@@ -708,20 +726,19 @@ KeyboardDevice::_ControlThread()
 			}
 		}
 
-		// Consistency repair: ev.value==1 is a genuine first press (not auto-repeat).
-		// If the key is already tracked as down we missed a key-up (QEMU input
-		// capture, libevdev/libinput dropping events).  Record the mismatch here
-		// so the XKB repair can be done inside the existing fKeymapLock section.
-		bool missedKeyUp = (ev.value == 1 && keycode < 128
-			&& (states[keycode >> 3] & (1 << (7 - (keycode & 7)))) != 0);
-		if (missedKeyUp)
-			states[keycode >> 3] &= ~(1 << (7 - (keycode & 7)));
+		uint32 haikuKey = linux_to_haiku_keycode(keycode);
 
-		if (keycode < 128) {
+		// Repair: ev.value==1 is first press (not repeat); if key already down, we missed UP event
+		bool missedKeyUp = (ev.value == 1 && haikuKey != 0 && haikuKey < 128
+			&& (states[haikuKey >> 3] & (1 << (7 - (haikuKey & 7)))) != 0);
+		if (missedKeyUp)
+			states[haikuKey >> 3] &= ~(1 << (7 - (haikuKey & 7)));
+
+		if (haikuKey != 0 && haikuKey < 128) {
 			if (isKeyDown)
-				states[(keycode) >> 3] |= (1 << (7 - (keycode & 0x7)));
+				states[haikuKey >> 3] |= (1 << (7 - (haikuKey & 0x7)));
 			else
-				states[(keycode) >> 3] &= (~(1 << (7 - (keycode & 0x7))));
+				states[haikuKey >> 3] &= (~(1 << (7 - (haikuKey & 0x7))));
 		}
 
 		if (isKeyDown && keycode == 111 /* KEY_DELETE */
@@ -746,7 +763,12 @@ KeyboardDevice::_ControlThread()
 				fOwner->fTeamMonitorWindow->PostMessage(&message);
 			}
 
-			if (!isKeyDown)
+#define _CADBIT(c) ((states[(c) >> 3] & (1 << (7 - ((c) & 7)))) != 0)
+			bool delHeld = _CADBIT(linux_to_haiku_keycode(111));
+			bool ctrlHeld = _CADBIT(fControlKey);
+			bool cmdHeld = _CADBIT(fCommandKey);
+#undef _CADBIT
+			if (!delHeld || !ctrlHeld || !cmdHeld)
 				ctrlAltDelPressed = false;
 		}
 
@@ -762,29 +784,29 @@ KeyboardDevice::_ControlThread()
 			uint32 repairedMods = 0;
 #define _KBIT(c) (states[(c) >> 3] & (1 << (7 - ((c) & 7))))
 			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_SHIFT,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_SHIFT_KEY;
-			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CTRL,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_CONTROL_KEY;
-			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_ALT,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_COMMAND_KEY;
-			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_LOGO,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_OPTION_KEY;
+					XKB_STATE_MODS_EFFECTIVE) > 0) repairedMods |= B_SHIFT_KEY;
 			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CAPS,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_CAPS_LOCK;
+					XKB_STATE_MODS_EFFECTIVE) > 0) repairedMods |= B_CAPS_LOCK;
 			if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_NUM,
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_NUM_LOCK;
-			if (xkb_state_mod_name_is_active(fXkbState, "Scroll_Lock",
-					XKB_STATE_MODS_EFFECTIVE)) repairedMods |= B_SCROLL_LOCK;
+					XKB_STATE_MODS_EFFECTIVE) > 0) repairedMods |= B_NUM_LOCK;
+			if (xkb_state_led_name_is_active(fXkbState,
+					XKB_LED_NAME_SCROLL) > 0) repairedMods |= B_SCROLL_LOCK;
 			if (menuKeyDown) repairedMods |= B_MENU_KEY;
-			if (_KBIT(42))  repairedMods |= B_LEFT_SHIFT_KEY;
-			if (_KBIT(54))  repairedMods |= B_RIGHT_SHIFT_KEY;
-			if (_KBIT(29))  repairedMods |= B_LEFT_CONTROL_KEY;
-			if (_KBIT(97))  repairedMods |= B_RIGHT_CONTROL_KEY;
-			if (_KBIT(56))  repairedMods |= B_LEFT_COMMAND_KEY;
-			if (_KBIT(100) && (repairedMods & B_COMMAND_KEY))
-				repairedMods |= B_RIGHT_COMMAND_KEY;
-			if (_KBIT(125)) repairedMods |= B_LEFT_OPTION_KEY;
-			if (_KBIT(126)) repairedMods |= B_RIGHT_OPTION_KEY;
+			if (_KBIT(kHaikuLeftShift))  repairedMods |= B_LEFT_SHIFT_KEY;
+			if (_KBIT(kHaikuRightShift))  repairedMods |= B_RIGHT_SHIFT_KEY;
+			const key_map& map = fKeymap.Map();
+			if (_KBIT(map.left_control_key))  repairedMods |= B_LEFT_CONTROL_KEY;
+			if (_KBIT(map.right_control_key))  repairedMods |= B_RIGHT_CONTROL_KEY;
+			if (_KBIT(map.left_command_key))  repairedMods |= B_LEFT_COMMAND_KEY;
+			if (_KBIT(map.right_command_key))  repairedMods |= B_RIGHT_COMMAND_KEY;
+			if (_KBIT(map.left_option_key)) repairedMods |= B_LEFT_OPTION_KEY;
+			if (_KBIT(map.right_option_key)) repairedMods |= B_RIGHT_OPTION_KEY;
+			if (repairedMods & (B_LEFT_CONTROL_KEY | B_RIGHT_CONTROL_KEY))
+				repairedMods |= B_CONTROL_KEY;
+			if (repairedMods & (B_LEFT_COMMAND_KEY | B_RIGHT_COMMAND_KEY))
+				repairedMods |= B_COMMAND_KEY;
+			if (repairedMods & (B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY))
+				repairedMods |= B_OPTION_KEY;
 #undef _KBIT
 			if (repairedMods != fModifiers) {
 				BMessage* repairMsg = new BMessage(B_MODIFIERS_CHANGED);
@@ -808,32 +830,30 @@ KeyboardDevice::_ControlThread()
 
 #define _KBIT(c) (states[(c) >> 3] & (1 << (7 - ((c) & 7))))
 		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_SHIFT,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_SHIFT_KEY;
-		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CTRL,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_CONTROL_KEY;
-		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_ALT,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_COMMAND_KEY;
-		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_LOGO,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_OPTION_KEY;
+				XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_SHIFT_KEY;
 		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_CAPS,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_CAPS_LOCK;
+				XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_CAPS_LOCK;
 		if (xkb_state_mod_name_is_active(fXkbState, XKB_MOD_NAME_NUM,
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_NUM_LOCK;
-		// Scroll Lock: not a standard xkbcommon named mod; track via raw key state
-		if (xkb_state_mod_name_is_active(fXkbState, "Scroll_Lock",
-				XKB_STATE_MODS_EFFECTIVE)) newModifiers |= B_SCROLL_LOCK;
+				XKB_STATE_MODS_EFFECTIVE) > 0) newModifiers |= B_NUM_LOCK;
+		// Scroll Lock is LED indicator, not xkb modifier
+		if (xkb_state_led_name_is_active(fXkbState,
+				XKB_LED_NAME_SCROLL) > 0) newModifiers |= B_SCROLL_LOCK;
 		if (menuKeyDown) newModifiers |= B_MENU_KEY;
-		if (_KBIT(42))  newModifiers |= B_LEFT_SHIFT_KEY;
-		if (_KBIT(54))  newModifiers |= B_RIGHT_SHIFT_KEY;
-		if (_KBIT(29))  newModifiers |= B_LEFT_CONTROL_KEY;
-		if (_KBIT(97))  newModifiers |= B_RIGHT_CONTROL_KEY;
-		if (_KBIT(56))  newModifiers |= B_LEFT_COMMAND_KEY;
-		// Only set B_RIGHT_COMMAND_KEY for Right Alt when xkb also sees it as
-		// the Alt modifier (not when it's acting as AltGr / ISO_Level3_Shift).
-		if (_KBIT(100) && (newModifiers & B_COMMAND_KEY))
-			newModifiers |= B_RIGHT_COMMAND_KEY;
-		if (_KBIT(125)) newModifiers |= B_LEFT_OPTION_KEY;
-		if (_KBIT(126)) newModifiers |= B_RIGHT_OPTION_KEY;
+		if (_KBIT(kHaikuLeftShift))  newModifiers |= B_LEFT_SHIFT_KEY;
+		if (_KBIT(kHaikuRightShift))  newModifiers |= B_RIGHT_SHIFT_KEY;
+		const key_map& map = fKeymap.Map();
+		if (_KBIT(map.left_control_key))  newModifiers |= B_LEFT_CONTROL_KEY;
+		if (_KBIT(map.right_control_key))  newModifiers |= B_RIGHT_CONTROL_KEY;
+		if (_KBIT(map.left_command_key))  newModifiers |= B_LEFT_COMMAND_KEY;
+		if (_KBIT(map.right_command_key))  newModifiers |= B_RIGHT_COMMAND_KEY;
+		if (_KBIT(map.left_option_key)) newModifiers |= B_LEFT_OPTION_KEY;
+		if (_KBIT(map.right_option_key)) newModifiers |= B_RIGHT_OPTION_KEY;
+		if (newModifiers & (B_LEFT_CONTROL_KEY | B_RIGHT_CONTROL_KEY))
+			newModifiers |= B_CONTROL_KEY;
+		if (newModifiers & (B_LEFT_COMMAND_KEY | B_RIGHT_COMMAND_KEY))
+			newModifiers |= B_COMMAND_KEY;
+		if (newModifiers & (B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY))
+			newModifiers |= B_OPTION_KEY;
 #undef _KBIT
 
 		fModifiers = newModifiers;
@@ -856,20 +876,14 @@ KeyboardDevice::_ControlThread()
 				_UpdateLEDs();
 		}
 
-		// Character generation via xkb.
-		// Call for both key-down and key-up so B_KEY_UP carries the same
-		// what as the corresponding B_KEY_DOWN (apps rely on this symmetry).
+		// Character generation via xkb (called for both key-down and key-up for symmetry)
 		char xkbBuf[64] = {};
 		xkb_state_key_get_utf8(fXkbState, xkbCode, xkbBuf, sizeof(xkbBuf));
 		int32 numBytes = strlen(xkbBuf);
 
-		// Haiku uses LF (0x0a) for Return and BS (0x08) for Backspace.
-		// xkbcommon correctly returns CR (0x0d) and DEL (0x7f) per Unicode,
-		// but Haiku's API diverges at exactly these two points.
+		// Haiku uses LF (0x0a) for Return; xkb reports CR (0x0d)
 		if (numBytes == 1 && (uint8_t)xkbBuf[0] == 0x0d)
 			xkbBuf[0] = 0x0a;
-		else if (numBytes == 1 && (uint8_t)xkbBuf[0] == 0x7f)
-			xkbBuf[0] = 0x08;
 
 		if (fXkbComposeState != NULL) {
 			xkb_compose_state_feed(fXkbComposeState, xkb_state_key_get_one_sym(fXkbState, xkbCode));
@@ -891,9 +905,7 @@ KeyboardDevice::_ControlThread()
 			}
 		}
 
-		// xkb returns nothing for navigation/function/system keys.
-		// Fall back to the Haiku special-character table so apps receive
-		// B_KEY_DOWN with the expected byte rather than B_UNMAPPED_KEY_DOWN.
+		// xkb returns nothing for nav/function/system keys; fall back to special-character table
 		if (numBytes == 0) {
 			for (int i = 0; kSpecialKeys[i].code != 0; i++) {
 				if (kSpecialKeys[i].code == keycode) {
@@ -906,10 +918,8 @@ KeyboardDevice::_ControlThread()
 			}
 		}
 
-		// Generate Ctrl+letter control characters (0x01–0x1a).
-		// xkb returns nothing for these; derive from the base character.
+		// Generate Ctrl+letter control chars (0x01–0x1a) from base character
 		if (numBytes == 0 && (fModifiers & B_CONTROL_KEY) != 0) {
-			char baseBuf[7] = {};
 			// Get the character without Ctrl modifier by querying the base level.
 			xkb_keysym_t sym = xkb_state_key_get_one_sym(fXkbState, xkbCode);
 			uint32_t unicode = xkb_keysym_to_utf32(sym);
@@ -933,8 +943,11 @@ KeyboardDevice::_ControlThread()
 		else
 			msg->what = isKeyDown ? B_UNMAPPED_KEY_DOWN : B_UNMAPPED_KEY_UP;
 
+		uint32 msgKey = (haikuKey != 0) ? haikuKey
+			: (keycode >= 0x80 ? keycode : 0);
+
 		msg->AddInt64("when", keyInfo.timestamp);
-		msg->AddInt32("key", keycode);
+		msg->AddInt32("key", msgKey);
 		msg->AddInt32("modifiers", fModifiers);
 		msg->AddData("states", B_UINT8_TYPE, states, 16);
 		if (numBytes > 0) {
@@ -942,7 +955,7 @@ KeyboardDevice::_ControlThread()
 				msg->AddInt8("byte", (int8)xkbBuf[i]);
 			msg->AddData("bytes", B_STRING_TYPE, xkbBuf, numBytes + 1);
 
-			// raw_char: base-level character (no modifiers).
+			// raw_char: base-level character (no modifiers)
 			xkb_keysym_t baseSym = XKB_KEY_NoSymbol;
 			{
 				const xkb_keysym_t* syms;
@@ -953,13 +966,11 @@ KeyboardDevice::_ControlThread()
 			}
 			uint32 rawChar = (baseSym != XKB_KEY_NoSymbol)
 				? xkb_keysym_to_utf32(baseSym) : 0;
-			// Non-character keysyms (XKB_KEY_Up, _Left, _Home, F-keys, …)
-			// give utf32 == 0. Haiku apps expect raw_char to equal the
-			// magic byte produced for these keys (e.g. B_UP_ARROW = 0x1e),
-			// so they can do `if (rawChar == B_UP_ARROW)`. Fall back to
-			// the byte we just synthesised via kSpecialKeys.
+			// Non-character keysyms (Up, Left, Home, F-keys) give utf32==0; fall back to kSpecialKeys
 			if (rawChar == 0 && numBytes > 0)
 				rawChar = (uint8)xkbBuf[0];
+			if (rawChar == 0x0d)
+				rawChar = B_ENTER;
 			msg->AddInt32("raw_char", (int32)rawChar);
 
 			if (isKeyDown && lastKeyCode == keycode) {
@@ -982,18 +993,63 @@ KeyboardDevice::_ControlThread()
 void
 KeyboardDevice::_ControlThreadCleanup()
 {
-	// NOTE: Only executed when the control thread detected an error
-	// and from within the control thread!
+	// Called from control thread on error only.
+	//
+	// Do NOT pre-clear fThread here: Stop() (invoked from the delete this
+	// triggers, on whichever thread ends up performing it) tells self-
+	// removal apart from external removal by comparing fThread against
+	// find_thread(), not by a flag on `this`. That keeps `this` valid for
+	// the snapshot below no matter which thread wins the race, since a
+	// joining Stop() can only return once this thread has truly finished.
 
 	if (fActive) {
-		fThread = -1;
-		fOwner->_RemoveDevice(fPath);
+		char path[B_PATH_NAME_LENGTH];
+		strlcpy(path, fPath, sizeof(path));
+		// Use serial not path: fast replug may swap in replacement.
+		int32 serial = fSerial;
+		fOwner->_RemoveDevice(path, serial);
 	} else {
-		// In case active is already false, another thread
-		// waits for this thread to quit, and may already hold
-		// locks that _RemoveDevice() wants to acquire. In another
-		// words, the device is already being removed, so we simply
-		// quit here.
+		// Device already being removed by another thread.
+	}
+}
+
+
+// xkb can only toggle locks, tap when LED disagrees with state
+void
+KeyboardDevice::_SyncLocksFromLEDs()
+{
+	if (fFD < 0 || fXkbState == NULL || fXkbKeymap == NULL)
+		return;
+
+	uint8 leds[LED_MAX / 8 + 1] = {};
+	if (ioctl(fFD, EVIOCGLED(sizeof(leds)), leds) < 0)
+		return;
+
+	static const struct {
+		uint32		ledBit;
+		const char*	keyName;
+		const char*	ledName;
+	} kLocks[] = {
+		{ LED_CAPSL,   "CAPS", XKB_LED_NAME_CAPS },
+		{ LED_NUML,    "NMLK", XKB_LED_NAME_NUM },
+		{ LED_SCROLLL, "SCLK", XKB_LED_NAME_SCROLL },
+	};
+
+	for (size_t i = 0; i < sizeof(kLocks) / sizeof(kLocks[0]); i++) {
+		bool ledOn = (leds[kLocks[i].ledBit / 8]
+			& (1 << (kLocks[i].ledBit % 8))) != 0;
+		bool lockOn = xkb_state_led_name_is_active(fXkbState,
+			kLocks[i].ledName) > 0;
+		if (ledOn == lockOn)
+			continue;
+
+		xkb_keycode_t code = xkb_keymap_key_by_name(fXkbKeymap,
+			kLocks[i].keyName);
+		if (code == XKB_KEYCODE_INVALID)
+			continue;
+
+		xkb_state_update_key(fXkbState, code, XKB_KEY_DOWN);
+		xkb_state_update_key(fXkbState, code, XKB_KEY_UP);
 	}
 }
 
@@ -1001,7 +1057,7 @@ KeyboardDevice::_ControlThreadCleanup()
 void
 KeyboardDevice::_RebuildXkb()
 {
-	// Tear down any existing xkb state
+	// Tear down existing xkb state
 	if (fXkbState != NULL) {
 		xkb_state_unref(fXkbState);
 		fXkbState = NULL;
@@ -1019,21 +1075,48 @@ KeyboardDevice::_RebuildXkb()
 		fXkbComposeState = NULL;
 	}
 
-	// Read xkb layout from settings file if present.
-	// File format (plain text, one key=value per line):
-	//   rules=evdev
-	//   model=pc105
-	//   layout=it
-	//   variant=
-	//   options=
+	// Resolution order (never merged)
 	char rules[64]    = "evdev";
 	char model[64]    = "pc105";
 	char layout[64]   = "";
 	char variant[64]  = "";
 	char options[256] = "";
 
+	bool haveLayout = false;
+	const char* source = "compiled-in default";
+
 	BPath settingsPath;
 	if (find_directory(B_USER_SETTINGS_DIRECTORY, &settingsPath) == B_OK) {
+		BPath layoutNamePath(settingsPath);
+		layoutNamePath.Append("input/layout");
+		FILE* f = fopen(layoutNamePath.Path(), "r");
+		if (f != NULL) {
+			char name[B_FILE_NAME_LENGTH] = "";
+			if (fgets(name, sizeof(name), f) != NULL) {
+				char* nl = strchr(name, '\n');
+				if (nl != NULL) *nl = '\0';
+				if (name[0] != '\0') {
+					const char* derivedLayout;
+					const char* derivedVariant;
+					look_up_xkb_layout(name, derivedLayout, derivedVariant);
+					strlcpy(layout, derivedLayout, sizeof(layout));
+					strlcpy(variant, derivedVariant, sizeof(variant));
+
+					BAutolock lock(fKeymapLock);
+					strlcpy(options,
+						look_up_xkb_modifier_options(fKeymap.Map()),
+						sizeof(options));
+
+					haveLayout = true;
+					source = "input/layout";
+				}
+			}
+			fclose(f);
+		}
+	}
+
+	if (!haveLayout && find_directory(B_USER_SETTINGS_DIRECTORY, &settingsPath)
+			== B_OK) {
 		settingsPath.Append("input/xkb_layout");
 		FILE* f = fopen(settingsPath.Path(), "r");
 		if (f != NULL) {
@@ -1054,6 +1137,41 @@ KeyboardDevice::_RebuildXkb()
 				parse(line, "options", options, sizeof(options));
 			}
 			fclose(f);
+			haveLayout = true;
+			source = "xkb_layout cache";
+		}
+	}
+
+	if (!haveLayout) {
+		FILE* f = fopen("/etc/default/keyboard", "r");
+		if (f != NULL) {
+			char line[512];
+			while (fgets(line, sizeof(line), f) != NULL) {
+				char* nl = strchr(line, '\n');
+				if (nl != NULL) *nl = '\0';
+				auto parse = [](const char* ln, const char* key,
+					char* out, size_t outLen) {
+					size_t klen = strlen(key);
+					if (strncmp(ln, key, klen) != 0 || ln[klen] != '=')
+						return;
+					const char* value = ln + klen + 1;
+					size_t len = strlen(value);
+					if (len >= 2 && value[0] == '"' && value[len - 1] == '"') {
+						value++;
+						len -= 2;
+					}
+					if (len >= outLen)
+						len = outLen - 1;
+					memcpy(out, value, len);
+					out[len] = '\0';
+				};
+				parse(line, "XKBMODEL",   model,   sizeof(model));
+				parse(line, "XKBLAYOUT",  layout,  sizeof(layout));
+				parse(line, "XKBVARIANT", variant, sizeof(variant));
+				parse(line, "XKBOPTIONS", options, sizeof(options));
+			}
+			fclose(f);
+			source = "/etc/default/keyboard";
 		}
 	}
 
@@ -1070,6 +1188,12 @@ KeyboardDevice::_RebuildXkb()
 	};
 	fXkbKeymap = xkb_keymap_new_from_names(fXkbContext, &names,
 		XKB_KEYMAP_COMPILE_NO_FLAGS);
+
+	fprintf(stderr, "KeyboardInputDevice: xkb rebuild rules=%s model=%s "
+		"layout=%s variant=%s options=%s source=%s -> %s\n",
+		rules, model, layout, variant, options, source,
+		fXkbKeymap != NULL ? "ok" : "FAILED");
+
 	if (fXkbKeymap == NULL) {
 		fprintf(stderr, "KeyboardInputDevice: xkb_keymap_new_from_names failed, "
 			"falling back to default\n");
@@ -1082,60 +1206,72 @@ KeyboardDevice::_RebuildXkb()
 		// Cannot continue without a keymap
 		return;
 	}
-		fXkbState = xkb_state_new(fXkbKeymap);
+	fXkbState = xkb_state_new(fXkbKeymap);
 	if (fXkbState == NULL) {
 		xkb_keymap_unref(fXkbKeymap);
 		fXkbKeymap = NULL;
 		return;
 	}
-	if (fXkbState != NULL) {
-		const char* locale = getenv("LANG");
-		if (locale == NULL || locale[0] == '\0')
-			locale = "C";
-		fXkbComposeTable = xkb_compose_table_new_from_locale(
-			fXkbContext, locale, XKB_COMPOSE_COMPILE_NO_FLAGS);
-		if (fXkbComposeTable != NULL) {
-			fXkbComposeState = xkb_compose_state_new(
-				fXkbComposeTable, XKB_COMPOSE_STATE_NO_FLAGS);
-			xkb_compose_table_unref(fXkbComposeTable);
-			fXkbComposeTable = NULL;
-		}
+	const char* locale = getenv("LANG");
+	if (locale == NULL || locale[0] == '\0')
+		locale = "C";
+	fXkbComposeTable = xkb_compose_table_new_from_locale(
+		fXkbContext, locale, XKB_COMPOSE_COMPILE_NO_FLAGS);
+	if (fXkbComposeTable != NULL) {
+		fXkbComposeState = xkb_compose_state_new(
+			fXkbComposeTable, XKB_COMPOSE_STATE_NO_FLAGS);
+		xkb_compose_table_unref(fXkbComposeTable);
+		fXkbComposeTable = NULL;
 	}
+
+	_SyncLocksFromLEDs();
 }
 
 
 void
-KeyboardDevice::_UpdateSettings(uint32 opcode)
+KeyboardDevice::_UpdateSettings(uint32 pending)
 {
 	CALLED();
 
-	if (opcode == 0 || opcode == B_KEY_REPEAT_RATE_CHANGED)
+	if ((pending & (SETTING_ALL
+			| SETTING_BIT(B_KEY_REPEAT_RATE_CHANGED))) != 0) {
 		get_key_repeat_rate(&fSettings.key_repeat_rate);
+	}
 
-	if (opcode == 0 || opcode == B_KEY_REPEAT_DELAY_CHANGED)
+	if ((pending & (SETTING_ALL
+			| SETTING_BIT(B_KEY_REPEAT_DELAY_CHANGED))) != 0) {
 		get_key_repeat_delay(&fSettings.key_repeat_delay);
+	}
 
-	if (opcode == 0 || opcode == B_KEY_REPEAT_RATE_CHANGED
-		|| opcode == B_KEY_REPEAT_DELAY_CHANGED) {
+	if ((pending & (SETTING_ALL | SETTING_BIT(B_KEY_REPEAT_RATE_CHANGED)
+			| SETTING_BIT(B_KEY_REPEAT_DELAY_CHANGED))) != 0) {
 		if (fSettings.key_repeat_rate > 0) {
+			// EVIOCSREP's rep[] is milliseconds, not microseconds.
 			unsigned int rep[2] = {
 				(unsigned int)(fSettings.key_repeat_delay / 1000),
-				(unsigned int)(1000000 / fSettings.key_repeat_rate)
+				(unsigned int)(10000 / fSettings.key_repeat_rate)
 			};
-			ioctl(fFD, EVIOCSREP, rep);
+			if (ioctl(fFD, EVIOCSREP, rep) < 0) {
+				fprintf(stderr, "KeyboardInputDevice: EVIOCSREP failed: %s\n",
+					strerror(errno));
+			}
 		}
 	}
 
-	if (opcode == 0 || opcode == B_KEY_MAP_CHANGED
-		|| opcode == B_KEY_LOCKS_CHANGED) {
+	if ((pending & (SETTING_ALL | SETTING_BIT(B_KEY_MAP_CHANGED)
+			| SETTING_BIT(B_KEY_LOCKS_CHANGED))) != 0) {
 		BAutolock lock(fKeymapLock);
 		fKeymap.RetrieveCurrent();
-		fModifiers = fKeymap.Map().lock_settings;
+		// Merge only the lock bits, or this stomps modifiers held mid-keypress.
+		const uint32 kLockBits = B_CAPS_LOCK | B_SCROLL_LOCK | B_NUM_LOCK;
+		fModifiers = (fModifiers & ~kLockBits)
+			| (fKeymap.Map().lock_settings & kLockBits);
 		_UpdateLEDs();
-		fControlKey = KEY_ControlL;  // 29 = KEY_LEFTCTRL
-		fCommandKey = KEY_CmdL;      // 56 = KEY_LEFTALT
+		fControlKey = linux_to_haiku_keycode(KEY_ControlL);
+		fCommandKey = linux_to_haiku_keycode(KEY_CmdL);
 
-		if (opcode == B_KEY_MAP_CHANGED) {
+		// SETTING_ALL is excluded: Start() already built the xkb state.
+		if ((pending & SETTING_BIT(B_KEY_MAP_CHANGED)) != 0) {
 			// Layout changed: rebuild xkb context/keymap/state from the
 			// updated settings file so subsequent key events use the new layout.
 			_RebuildXkb();
@@ -1215,7 +1351,32 @@ KeyboardInputDevice::~KeyboardInputDevice()
 	}
 
 	StopMonitoringDevice(kKeyboardDevicesDirectory);
-	fDevices.MakeEmpty();
+
+	// Detach every device under the lock, then delete them outside it:
+	// ~KeyboardDevice() may join a control thread via Stop(), and joining
+	// while fDeviceListLock is held can deadlock against that same
+	// thread's own self-removal call (see _ControlThreadCleanup()).
+	BObjectList<KeyboardDevice, false> doomed;
+	{
+		BAutolock _(fDeviceListLock);
+		for (int32 i = fDevices.CountItems() - 1; i >= 0; i--)
+			doomed.AddItem(fDevices.ItemAt(i));
+		fDevices.MakeEmpty(false);
+	}
+
+	// Unregister before deleting: ~BInputServerDevice() does it too, but
+	// a base destructor runs after this one, so input_server would still
+	// hold cookies pointing at freed devices in between.
+	for (int32 i = 0; i < doomed.CountItems(); i++) {
+		KeyboardDevice* device = doomed.ItemAt(i);
+
+		input_device_ref* devices[2];
+		devices[0] = device->DeviceRef();
+		devices[1] = NULL;
+		UnregisterDevices(devices);
+
+		delete device;
+	}
 }
 
 
@@ -1272,11 +1433,14 @@ KeyboardInputDevice::Control(const char* name, void* cookie,
 		command);
 
 	if (command == B_NODE_MONITOR)
-		_HandleMonitor(message);
+		return _HandleMonitor(message);
 	else if (command >= B_KEY_MAP_CHANGED
 		&& command <= B_KEY_REPEAT_RATE_CHANGED) {
 		KeyboardDevice* device = (KeyboardDevice*)cookie;
 		device->UpdateSettings(command);
+	} else if (command == B_GET_DEVICE_DESCRIPTION) {
+		KeyboardDevice* device = (KeyboardDevice*)cookie;
+		return device->GetDescription(message);
 	}
 	return B_OK;
 }
@@ -1325,18 +1489,34 @@ KeyboardInputDevice::_AddDevice(const char* path)
 	CALLED();
 	TRACE("path: %s\n", path);
 
+	// The node monitor hands us any entry under /dev/input, not just
+	// device nodes.
+	struct stat st;
+	if (stat(path, &st) != 0 || !S_ISCHR(st.st_mode))
+		return B_BAD_TYPE;
+
 	// Only accept keyboard-capable evdev nodes (have EV_KEY + KEY_A,
 	// but not BTN_LEFT which would indicate a mouse/pointer device).
+	BString description;
 	{
 		int fd = open(path, O_RDONLY | O_NONBLOCK);
-		if (fd < 0)
-			return B_ERROR;
+		if (fd < 0) {
+			// udev widens permissions shortly after the node appears;
+			// report distinctly so AddOnManager retries.
+			return (errno == EACCES || errno == EPERM)
+				? B_PERMISSION_DENIED : B_ERROR;
+		}
 		struct libevdev* probe = NULL;
 		bool isKeyboard = false;
 		if (libevdev_new_from_fd(fd, &probe) == 0) {
 			isKeyboard = libevdev_has_event_type(probe, EV_KEY)
 				&& libevdev_has_event_code(probe, EV_KEY, KEY_A)
 				&& !libevdev_has_event_code(probe, EV_KEY, BTN_LEFT);
+			if (isKeyboard) {
+				const char* deviceName = libevdev_get_name(probe);
+				if (deviceName != NULL)
+					description = deviceName;
+			}
 			libevdev_free(probe);
 		}
 		close(fd);
@@ -1344,13 +1524,19 @@ KeyboardInputDevice::_AddDevice(const char* path)
 			return B_BAD_TYPE;
 	}
 
-	BAutolock _(fDeviceListLock);
-
+	// Detach and delete any stale device already at this path (fast
+	// replug) before the lock below is taken: _RemoveDevice() may join
+	// that device's control thread via Stop(), and that must happen
+	// without fDeviceListLock held, see _DetachDevice().
 	_RemoveDevice(path);
+
+	BAutolock _(fDeviceListLock);
 
 	KeyboardDevice* device = new(std::nothrow) KeyboardDevice(this, path);
 	if (device == NULL)
 		return B_NO_MEMORY;
+
+	device->SetDescription(description.String());
 
 	input_device_ref* devices[2];
 	devices[0] = device->DeviceRef();
@@ -1362,26 +1548,76 @@ KeyboardInputDevice::_AddDevice(const char* path)
 }
 
 
-status_t
-KeyboardInputDevice::_RemoveDevice(const char* path)
+KeyboardDevice*
+KeyboardInputDevice::_DetachDevice(const char* path, const int32* serial)
 {
-	BAutolock _(fDeviceListLock);
+	KeyboardDevice* device = NULL;
+	{
+		BAutolock _(fDeviceListLock);
 
-	KeyboardDevice* device = _FindDevice(path);
-	if (device == NULL)
-		return B_ENTRY_NOT_FOUND;
+		device = _FindDevice(path);
+		if (device == NULL)
+			return NULL;
 
-	CALLED();
-	TRACE("path: %s\n", path);
+		// ABA guard: a replacement can land on the same address, so
+		// serial, not pointer.
+		if (serial != NULL && device->Serial() != *serial) {
+			TRACE("%s: stale removal (serial %ld != %ld), ignoring\n", path,
+				(long)*serial, (long)device->Serial());
+			return NULL;
+		}
 
+		CALLED();
+		TRACE("path: %s\n", path);
+
+		// Detach only, don't delete: the caller deletes outside the lock,
+		// so ~KeyboardDevice()'s Stop() can join the control thread
+		// without holding fDeviceListLock. Holding it there would
+		// deadlock against the control thread's own self-removal call
+		// into _RemoveDevice(), which needs the same lock (see
+		// _ControlThreadCleanup()).
+		fDevices.RemoveItem(device, false);
+	}
+
+	// Outside the lock for two reasons. UnregisterDevices() makes
+	// input_server call BInputServerDevice::Stop(), which joins the
+	// control thread; that join must not happen under fDeviceListLock or
+	// it deadlocks against the same thread's self-removal. And it takes
+	// InputServer::fInputDeviceListLocker, which input_server already
+	// holds when it calls into Control() (InputServer.cpp:1496,:1504),
+	// so acquiring it under fDeviceListLock inverts the established
+	// order. The device is off the list but still alive here, so a
+	// callback arriving with the cookie in this window is safe.
 	input_device_ref* devices[2];
 	devices[0] = device->DeviceRef();
 	devices[1] = NULL;
 
 	UnregisterDevices(devices);
 
-	fDevices.RemoveItem(device);
+	return device;
+}
 
+
+status_t
+KeyboardInputDevice::_RemoveDevice(const char* path)
+{
+	KeyboardDevice* device = _DetachDevice(path, NULL);
+	if (device == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	delete device;
+	return B_OK;
+}
+
+
+status_t
+KeyboardInputDevice::_RemoveDevice(const char* path, int32 serial)
+{
+	KeyboardDevice* device = _DetachDevice(path, &serial);
+	if (device == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	delete device;
 	return B_OK;
 }
 

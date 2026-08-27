@@ -45,9 +45,19 @@ private:
 			MouseDevice*	_FindDevice(const char* path) const;
 			status_t		_AddDevice(const char* path);
 			status_t		_RemoveDevice(const char* path);
+			// Identity-aware form for the self-removal path: only removes
+			// the device at `path` if it is still the one carrying
+			// `serial`. See MouseDevice::fSerial.
+			status_t		_RemoveDevice(const char* path, int32 serial);
+			// Finds, ABA-checks (if serial != NULL) and detaches the
+			// device from fDevices, all under one lock acquisition, but
+			// does NOT delete it: the caller must delete the returned
+			// pointer outside the lock, see _RemoveDevice() in the .cpp.
+			MouseDevice*	_DetachDevice(const char* path,
+								const int32* serial);
 
 private:
-			BObjectList<MouseDevice> fDevices;
+			BObjectList<MouseDevice, true> fDevices;
 			BLocker			fDeviceListLock;
 
 public:

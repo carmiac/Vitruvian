@@ -14,6 +14,7 @@
 #include <Handler.h>
 #include <InputServerDevice.h>
 #include <Locker.h>
+#include <String.h>
 
 struct libevdev;
 struct xkb_context;
@@ -45,12 +46,19 @@ public:
 			const char*			Path() const { return fPath; }
 			input_device_ref*	DeviceRef() { return &fDeviceRef; }
 
+			int32				Serial() const { return fSerial; }
+
+			status_t			GetDescription(BMessage* message) const;
+			void				SetDescription(const char* name)
+									{ fDescription = name; }
+
 private:
 	static	int32				_ControlThreadEntry(void* arg);
 			int32				_ControlThread();
 			void				_ControlThreadCleanup();
-			void				_UpdateSettings(uint32 opcode);
+			void				_UpdateSettings(uint32 pending);
 			void				_RebuildXkb();
+			void				_SyncLocksFromLEDs();
 			void				_UpdateLEDs();
 			status_t			_EnqueueInlineInputMethod(int32 opcode,
 									const char* string = NULL,
@@ -62,6 +70,8 @@ private:
 			input_device_ref	fDeviceRef;
 			char				fPath[B_PATH_NAME_LENGTH];
 			int					fFD;
+			int32				fSerial;
+			BString				fDescription;
 			struct libevdev*	fInputHandle;
 			int					fEpollFd;
 			struct xkb_context*	fXkbContext;
@@ -78,8 +88,11 @@ private:
 			uint32				fControlKey;
 			uint16				fKeyboardID;
 
-	volatile bool				fUpdateSettings;
-	volatile uint32				fSettingsCommand;
+			// Claimed with atomic_get_and_set(), so int32 and not
+			// volatile: the atomic supplies the ordering, and a
+			// volatile-qualified uint32 only type-checks under
+			// -fpermissive.
+			int32				fSettingsCommand;
 
 			Keymap				fKeymap;
 			BLocker				fKeymapLock;
@@ -112,6 +125,13 @@ private:
 			KeyboardDevice*		_FindDevice(const char* path) const;
 			status_t			_AddDevice(const char* path);
 			status_t			_RemoveDevice(const char* path);
+			status_t			_RemoveDevice(const char* path, int32 serial);
+			// Finds, ABA-checks (if serial != NULL) and detaches the
+			// device from fDevices, all under one lock acquisition, but
+			// does NOT delete it: the caller must delete the returned
+			// pointer outside the lock, see _RemoveDevice() in the .cpp.
+			KeyboardDevice*		_DetachDevice(const char* path,
+									const int32* serial);
 
 			BObjectList<KeyboardDevice, true> fDevices;
 			BLocker				fDeviceListLock;

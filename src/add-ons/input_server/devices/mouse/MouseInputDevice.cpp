@@ -39,6 +39,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include "LinuxEvdevShim.h"
 
 #include <libinput.h>
@@ -135,11 +136,21 @@ public:
 			status_t			Start();
 			void				Stop();
 
+			// Called once from _AddDevice(); Start() must not re-probe.
+			status_t			_Classify();
+
 			status_t			UpdateSettings();
 			status_t			UpdateTouchpadSettings(const BMessage* message);
 
+			// Hardware name, distinct from fDeviceRef.name (the
+			// identity/settings key).
+			status_t			GetDescription(BMessage* message) const;
+
 			const char*			Path() const { return fPath.String(); }
 			input_device_ref*	DeviceRef() { return &fDeviceRef; }
+
+			// Identity for removal; immune to ABA (see fSerial).
+			int32				Serial() const { return fSerial; }
 
 private:
 			char*				_BuildShortName() const;
@@ -194,7 +205,14 @@ private:
 			bool				fLibinputIsDirectTouch;
 			bool				fLibinputTouchSlot0Down;
 
+			bigtime_t			fLastClickTime;
+			int32				fClickCount;
+			uint32				fLastClickButtons;
+
 			bool				fIsAbsolute;
+			// A clickpad reports finger position on the pad, so it
+			// needs delta tracking, not a position jump.
+			bool				fIsAbsoluteTouchpad;
 			int32				fAbsMaxX, fAbsMaxY;
 			int32				fLastAbsX, fLastAbsY;
 			BPoint				fCursorPosition;
@@ -204,9 +222,13 @@ private:
 			mouse_settings		fSettings;
 			bool				fDeviceRemapsButtons;
 
+			int32				fSerial;
+
 			thread_id			fThread;
 	volatile bool				fActive;
-	volatile bool				fUpdateSettings;
+			// Claimed with atomic_get_and_set(), so int32 and not
+			// volatile; matches the keyboard add-on.
+			int32				fUpdateSettings;
 
 			bool				fIsTouchpad;
 			TouchpadMovement	fTouchpadMovementMaker;
@@ -220,6 +242,10 @@ instantiate_input_device()
 {
 	return new(std::nothrow) MouseInputDevice();
 }
+
+
+// Monotonic; a heap address can be handed out twice (ABA).
+static int32 sNextMouseDeviceSerial = 0;
 
 
 //	#pragma mark -
@@ -249,7 +275,11 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fLibinputLastClickButton(0),
 	fLibinputIsDirectTouch(false),
 	fLibinputTouchSlot0Down(false),
+	fLastClickTime(0),
+	fClickCount(0),
+	fLastClickButtons(0),
 	fIsAbsolute(false),
+	fIsAbsoluteTouchpad(false),
 	fAbsMaxX(65535),
 	fAbsMaxY(65535),
 	fLastAbsX(-1),
@@ -258,9 +288,10 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fScreenW(1280),
 	fScreenH(800),
 	fDeviceRemapsButtons(false),
+	fSerial(atomic_add(&sNextMouseDeviceSerial, 1)),
 	fThread(-1),
 	fActive(false),
-	fUpdateSettings(false),
+	fUpdateSettings(0),
 	fIsTouchpad(false),
 	fTouchpadSettingsMessage(NULL),
 	fTouchpadSettingsLock("Touchpad settings lock")
@@ -273,7 +304,7 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 
 	for (int i = 0; i < B_MAX_MOUSE_BUTTONS; i++)
 		fSettings.map.button[i] = B_MOUSE_BUTTON(i + 1);
-	// Default speed so cursor moves before settings are loaded (speed=0 → frozen)
+	// Default speed so cursor moves before settings are loaded (speed=0 -> frozen)
 	fSettings.accel.speed = 65536;
 }
 
@@ -283,11 +314,111 @@ MouseDevice::~MouseDevice()
 	CALLED();
 	TRACE("delete\n");
 
-	if (fActive)
-		Stop();
+	// _Classify() may have opened handles before Start() ever ran.
+	Stop();
 
 	free(fDeviceRef.name);
 	delete fTouchpadSettingsMessage;
+}
+
+
+status_t
+MouseDevice::_Classify()
+{
+	CALLED();
+
+	// Called once from _AddDevice() before the device is registered.
+	int fd = open(fPath.String(), O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		// udev widens permissions shortly after the node appears;
+		// report distinctly so AddOnManager retries.
+		return (errno == EACCES || errno == EPERM)
+			? B_PERMISSION_DENIED : B_ERROR;
+	}
+
+	if (_IsGestureDevice(fd)) {
+		close(fd);
+
+		fUseLibinput = true;
+
+		fLibinput = libinput_path_create_context(&kLibinputInterface, NULL);
+		if (fLibinput == NULL) {
+			LOG_ERROR("MouseDevice: libinput_path_create_context failed for %s\n",
+				fPath.String());
+			fUseLibinput = false;
+			return B_ERROR;
+		}
+
+		fLibinputDev = libinput_path_add_device(fLibinput, fPath.String());
+		if (fLibinputDev == NULL) {
+			LOG_ERROR("MouseDevice: libinput_path_add_device failed for %s\n",
+				fPath.String());
+			libinput_unref(fLibinput);
+			fLibinput = NULL;
+			fUseLibinput = false;
+			return B_ERROR;
+		}
+
+		libinput_device_ref(fLibinputDev);
+
+		// libinput needs one dispatch before device config is accessible.
+		libinput_dispatch(fLibinput);
+
+		if (libinput_device_config_tap_get_finger_count(
+				fLibinputDev) > 0) {
+			libinput_device_config_tap_set_enabled(fLibinputDev,
+				LIBINPUT_CONFIG_TAP_ENABLED);
+		}
+
+		// Raw touchscreens never fire POINTER_BUTTON, so synthesize from TOUCH.
+		fLibinputIsDirectTouch =
+			libinput_device_has_capability(fLibinputDev,
+				LIBINPUT_DEVICE_CAP_TOUCH) &&
+			!libinput_device_has_capability(fLibinputDev,
+				LIBINPUT_DEVICE_CAP_POINTER);
+
+		return B_OK;
+	}
+
+	struct libevdev* evdev = NULL;
+	if (libevdev_new_from_fd(fd, &evdev) < 0) {
+		close(fd);
+		return B_BAD_TYPE;
+	}
+
+	bool isRelMouse = libevdev_has_event_type(evdev, EV_REL)
+		&& libevdev_has_event_code(evdev, EV_REL, REL_X)
+		&& libevdev_has_event_code(evdev, EV_KEY, BTN_LEFT);
+	bool isAbsMouse = !isRelMouse
+		&& libevdev_has_event_type(evdev, EV_ABS)
+		&& libevdev_has_event_code(evdev, EV_ABS, ABS_X)
+		&& libevdev_has_event_code(evdev, EV_KEY, BTN_LEFT);
+
+	if (!isRelMouse && !isAbsMouse) {
+		libevdev_free(evdev);
+		close(fd);
+		return B_BAD_TYPE;
+	}
+
+	if (isAbsMouse) {
+		fIsAbsolute = true;
+		int mx = libevdev_get_abs_maximum(evdev, ABS_X);
+		int my = libevdev_get_abs_maximum(evdev, ABS_Y);
+		if (mx > 0) fAbsMaxX = mx;
+		if (my > 0) fAbsMaxY = my;
+
+		// INPUT_PROP_BUTTONPAD/BTN_TOOL_FINGER separates a clickpad
+		// from a real tablet.
+		fIsAbsoluteTouchpad =
+			libevdev_has_property(evdev, INPUT_PROP_BUTTONPAD)
+			|| libevdev_has_event_code(evdev, EV_KEY,
+				BTN_TOOL_FINGER);
+	}
+
+	fEvdevHandle = evdev;
+	fDevice = fd;
+
+	return B_OK;
 }
 
 
@@ -296,94 +427,12 @@ MouseDevice::Start()
 {
 	CALLED();
 
-	// Open the device fd once to classify it
-	int classifyFd = open(fPath.String(), O_RDONLY | O_NONBLOCK);
-	if (classifyFd >= 0) {
-		if (_IsGestureDevice(classifyFd)) {
-			// Gesture device: hand off to libinput (path context)
-			close(classifyFd);
-			classifyFd = -1;
-
-			fUseLibinput = true;
-
-			fLibinput = libinput_path_create_context(&kLibinputInterface, NULL);
-			if (fLibinput == NULL) {
-				LOG_ERROR("MouseDevice: libinput_path_create_context failed for %s\n",
-					fPath.String());
-				fUseLibinput = false;
-			} else {
-				fLibinputDev = libinput_path_add_device(fLibinput,
-					fPath.String());
-				if (fLibinputDev == NULL) {
-					LOG_ERROR("MouseDevice: libinput_path_add_device failed for %s\n",
-						fPath.String());
-					libinput_unref(fLibinput);
-					fLibinput = NULL;
-					fUseLibinput = false;
-				} else {
-					// libinput owns the device ref; add our own ref
-					libinput_device_ref(fLibinputDev);
-
-					// Initial dispatch so the DEVICE_ADDED event is consumed
-					// (required before device config is accessible)
-					libinput_dispatch(fLibinput);
-
-					// Enable tap-to-click if the device supports it
-					if (libinput_device_config_tap_get_finger_count(
-							fLibinputDev) > 0) {
-						libinput_device_config_tap_set_enabled(fLibinputDev,
-							LIBINPUT_CONFIG_TAP_ENABLED);
-					}
-
-					// Detect direct-touch (touchscreen): has TOUCH cap, no POINTER cap.
-					// On these devices we synthesize B_MOUSE_DOWN/UP from TOUCH events
-					// rather than relying on POINTER_BUTTON (which doesn't fire for
-					// raw touch screens).
-					fLibinputIsDirectTouch =
-						libinput_device_has_capability(fLibinputDev,
-							LIBINPUT_DEVICE_CAP_TOUCH) &&
-						!libinput_device_has_capability(fLibinputDev,
-							LIBINPUT_DEVICE_CAP_POINTER);
-				}
-			}
-		} else {
-			// Check if it's a plain relative or absolute mouse via evdev
-			struct libevdev* evdev = NULL;
-			if (libevdev_new_from_fd(classifyFd, &evdev) < 0) {
-				close(classifyFd);
-				classifyFd = -1;
-			} else {
-				bool isRelMouse = libevdev_has_event_type(evdev, EV_REL)
-					&& libevdev_has_event_code(evdev, EV_REL, REL_X)
-					&& libevdev_has_event_code(evdev, EV_KEY, BTN_LEFT);
-				bool isAbsMouse = !isRelMouse
-					&& libevdev_has_event_type(evdev, EV_ABS)
-					&& libevdev_has_event_code(evdev, EV_ABS, ABS_X)
-					&& libevdev_has_event_code(evdev, EV_KEY, BTN_LEFT);
-
-				if (!isRelMouse && !isAbsMouse) {
-					libevdev_free(evdev);
-					close(classifyFd);
-					classifyFd = -1;
-				} else {
-					if (isAbsMouse) {
-						fIsAbsolute = true;
-						int mx = libevdev_get_abs_maximum(evdev, ABS_X);
-						int my = libevdev_get_abs_maximum(evdev, ABS_Y);
-						if (mx > 0) fAbsMaxX = mx;
-						if (my > 0) fAbsMaxY = my;
-					}
-					fEvdevHandle = evdev;
-					fDevice = classifyFd;
-					classifyFd = -1;
-				}
-			}
-		}
-	}
-
-	if (classifyFd >= 0) {
-		close(classifyFd);
-		classifyFd = -1;
+	// Re-acquire only if Stop() released the handles, or the thread
+	// spawns onto fDevice == -1.
+	if (fDevice < 0 && !fUseLibinput) {
+		status_t classifyStatus = _Classify();
+		if (classifyStatus != B_OK)
+			return classifyStatus;
 	}
 
 	char threadName[B_OS_NAME_LENGTH];
@@ -455,11 +504,18 @@ MouseDevice::Stop()
 	}
 
 	if (fThread >= 0) {
-		suspend_thread(fThread);
-		resume_thread(fThread);
+		if (find_thread(NULL) == fThread) {
+			// Stop() reached via this control thread's own cleanup path
+			// (self removal through fTarget._RemoveDevice()); joining
+			// ourselves here would deadlock forever, and the thread is
+			// already unwinding back to its own return statement.
+		} else {
+			suspend_thread(fThread);
+			resume_thread(fThread);
 
-		status_t dummy;
-		wait_for_thread(fThread, &dummy);
+			status_t dummy;
+			wait_for_thread(fThread, &dummy);
+		}
 	}
 }
 
@@ -472,7 +528,7 @@ MouseDevice::UpdateSettings()
 	if (fThread < 0)
 		return B_ERROR;
 
-	fUpdateSettings = true;
+	atomic_set(&fUpdateSettings, 1);
 
 	return B_OK;
 }
@@ -488,7 +544,7 @@ MouseDevice::UpdateTouchpadSettings(const BMessage* message)
 
 	BAutolock _(fTouchpadSettingsLock);
 
-	fUpdateSettings = true;
+	atomic_set(&fUpdateSettings, 1);
 
 	delete fTouchpadSettingsMessage;
 	fTouchpadSettingsMessage = new BMessage(*message);
@@ -496,6 +552,35 @@ MouseDevice::UpdateTouchpadSettings(const BMessage* message)
 		return B_NO_MEMORY;
 
 	return B_OK;
+}
+
+
+status_t
+MouseDevice::GetDescription(BMessage* message) const
+{
+	if (message == NULL)
+		return B_BAD_VALUE;
+
+	const char* name = NULL;
+	if (fEvdevHandle != NULL)
+		name = libevdev_get_name(fEvdevHandle);
+	else if (fUseLibinput && fLibinputDev != NULL)
+		name = libinput_device_get_name(fLibinputDev);
+
+	if (name == NULL || name[0] == '\0')
+		return B_NAME_NOT_FOUND;
+
+	return message->AddString("description", name);
+}
+
+
+static int32
+device_index_from_name(const BString& name)
+{
+	const char* digits = name.String();
+	digits += strcspn(digits, "0123456789");
+
+	return *digits != '\0' ? atoi(digits) : 0;
 }
 
 
@@ -508,10 +593,7 @@ MouseDevice::_BuildShortName() const
 
 	int32 slash = string.FindLast("/");
 	string.CopyInto(deviceName, slash + 1, string.Length() - slash);
-	// atoi("event3") = 0 because it stops at 'e'; skip non-digit prefix
-	const char* p = deviceName.String();
-	while (*p && (*p < '0' || *p > '9')) p++;
-	int32 index = (*p ? atoi(p) : 0) + 1;
+	int32 index = device_index_from_name(deviceName) + 1;
 
 	int32 previousSlash = string.FindLast("/", slash);
 	string.CopyInto(name, previousSlash + 1, slash - previousSlash - 1);
@@ -589,10 +671,10 @@ MouseDevice::_ControlThread()
 		libinput_dispatch(fLibinput);
 
 		while (fActive) {
-			if (fUpdateSettings) {
-				fUpdateSettings = false;
+			// One atomic claim, so a settings change landing between
+			// the test and the clear cannot be dropped.
+			if (atomic_get_and_set(&fUpdateSettings, 0) != 0)
 				_UpdateSettings();
-			}
 
 			struct pollfd pfd;
 			pfd.fd = lifd;
@@ -654,10 +736,10 @@ MouseDevice::_ControlThread()
 		}
 
 		while (fActive) {
-			if (fUpdateSettings) {
-				fUpdateSettings = false;
+			// One atomic claim, so a settings change landing between
+			// the test and the clear cannot be dropped.
+			if (atomic_get_and_set(&fUpdateSettings, 0) != 0)
 				_UpdateSettings();
-			}
 
 			struct epoll_event fired;
 			int n = epoll_wait(fEpollFd, &fired, 1, 100);
@@ -691,6 +773,12 @@ MouseDevice::_ControlThread()
 						;
 					continue;
 				}
+				if (rc < 0) {
+					// Not -EAGAIN: treating it as such spun epoll
+					// forever on a level-triggered EPOLLHUP.
+					_ControlThreadCleanup();
+					return;
+				}
 				if (rc != LIBEVDEV_READ_STATUS_SUCCESS)
 					break;
 
@@ -712,6 +800,13 @@ MouseDevice::_ControlThread()
 						case ABS_Y: currentAbsY = iev.value; break;
 					}
 				} else if (iev.type == EV_KEY) {
+					if (fIsAbsoluteTouchpad && iev.code == BTN_TOOL_FINGER
+						&& iev.value == 0) {
+						// Finger lifted: drop the reference or the
+						// next touch-down jumps the cursor.
+						fLastAbsX = -1;
+						fLastAbsY = -1;
+					}
 					uint32 bit = 0;
 					switch (iev.code) {
 						case BTN_LEFT:   bit = 0x01; break;
@@ -734,32 +829,44 @@ MouseDevice::_ControlThread()
 			// Update cursor position.  For relative devices, read the latest shared
 			// position first so deltas from this device compose with moves from any
 			// other device (e.g. a touchpad that was used moments ago).
-			if (fIsAbsolute && currentAbsX >= 0) {
+			if (fIsAbsolute && !fIsAbsoluteTouchpad && currentAbsX >= 0) {
 				fCursorPosition.x = (float)currentAbsX / fAbsMaxX * fScreenW;
 				fCursorPosition.y = (float)currentAbsY / fAbsMaxY * fScreenH;
 				fLastAbsX = currentAbsX;
 				fLastAbsY = currentAbsY;
 				xdelta = 1; // non-zero to trigger movement message
 				ydelta = 0;
-			} else if (!fIsAbsolute && (xdelta != 0 || ydelta != 0)) {
-				// Sync from shared before applying delta.
-				if (fTarget.fCursorLock.Lock()) {
-					fCursorPosition = fTarget.fCursorPosition;
-					fTarget.fCursorLock.Unlock();
+			} else {
+				if (fIsAbsoluteTouchpad && currentAbsX >= 0) {
+					// Touchpad sample is finger position on the pad,
+					// not screen.
+					if (fLastAbsX >= 0) {
+						xdelta += currentAbsX - fLastAbsX;
+						ydelta += currentAbsY - fLastAbsY;
+					}
+					fLastAbsX = currentAbsX;
+					fLastAbsY = currentAbsY;
 				}
-				float histX = 0, histY = 0;
-				mouse_movement mv;
-				memset(&mv, 0, sizeof(mv));
-				mv.xdelta = xdelta; mv.ydelta = ydelta;
-				mv.timestamp = timestamp;
-				int32 dX, dY;
-				_ComputeAcceleration(mv, dX, dY, histX, histY);
-				fCursorPosition.x += dX;
-				fCursorPosition.y += dY;
-				fCursorPosition.x = std::max(0.0f,
-					std::min((float)(fScreenW - 1), fCursorPosition.x));
-				fCursorPosition.y = std::max(0.0f,
-					std::min((float)(fScreenH - 1), fCursorPosition.y));
+
+				if (xdelta != 0 || ydelta != 0) {
+					if (fTarget.fCursorLock.Lock()) {
+						fCursorPosition = fTarget.fCursorPosition;
+						fTarget.fCursorLock.Unlock();
+					}
+					float histX = 0, histY = 0;
+					mouse_movement mv;
+					memset(&mv, 0, sizeof(mv));
+					mv.xdelta = xdelta; mv.ydelta = ydelta;
+					mv.timestamp = timestamp;
+					int32 dX, dY;
+					_ComputeAcceleration(mv, dX, dY, histX, histY);
+					fCursorPosition.x += dX;
+					fCursorPosition.y += dY;
+					fCursorPosition.x = std::max(0.0f,
+						std::min((float)(fScreenW - 1), fCursorPosition.x));
+					fCursorPosition.y = std::max(0.0f,
+						std::min((float)(fScreenH - 1), fCursorPosition.y));
+				}
 			}
 			// Write back to shared slot so the next device starts from here.
 			if (fTarget.fCursorLock.Lock()) {
@@ -767,8 +874,9 @@ MouseDevice::_ControlThread()
 				fTarget.fCursorLock.Unlock();
 			}
 
-			bool hasMoved = (fIsAbsolute && fLastAbsX >= 0)
-				|| (!fIsAbsolute && (xdelta != 0 || ydelta != 0));
+			bool hasMoved = (fIsAbsolute && !fIsAbsoluteTouchpad
+					&& fLastAbsX >= 0)
+				|| (xdelta != 0 || ydelta != 0);
 			uint32 changedButtons = lastButtons ^ currentButtons;
 
 			if (!hasMoved && changedButtons == 0
@@ -784,8 +892,18 @@ MouseDevice::_ControlThread()
 					pressed ? B_MOUSE_DOWN : B_MOUSE_UP,
 					timestamp, remappedButtons);
 				if (message != NULL) {
-					if (pressed)
-						message->AddInt32("clicks", 1);
+					if (pressed) {
+						if (remappedButtons == fLastClickButtons
+							&& fLastClickTime + fSettings.click_speed
+								> timestamp)
+							fClickCount++;
+						else
+							fClickCount = 1;
+
+						fLastClickTime = timestamp;
+						fLastClickButtons = remappedButtons;
+						message->AddInt32("clicks", fClickCount);
+					}
 					fTarget.EnqueueMessage(message);
 					lastButtons = currentButtons;
 				}
@@ -818,9 +936,19 @@ MouseDevice::_ControlThread()
 void
 MouseDevice::_ControlThreadCleanup()
 {
+	// Do NOT pre-clear fThread here: Stop() (invoked from the delete this
+	// triggers, on whichever thread ends up performing it) tells self-
+	// removal apart from external removal by comparing fThread against
+	// find_thread(), not by a flag on `this`. That keeps `this` valid for
+	// the snapshot below no matter which thread wins the race, since a
+	// joining Stop() can only return once this thread has truly finished.
+
 	if (fActive) {
-		fThread = -1;
-		fTarget._RemoveDevice(fPath.String());
+		BString path(fPath);
+		// Serial, not path: a fast replug may already have swapped in
+		// a replacement.
+		int32 serial = fSerial;
+		fTarget._RemoveDevice(path.String(), serial);
 	}
 }
 
@@ -1095,7 +1223,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			if (state == LIBINPUT_BUTTON_STATE_PRESSED) {
 				bigtime_t now = system_time();
 				if (beButton == fLibinputLastClickButton
-					&& (now - fLibinputLastClickTime) < 300000LL)
+					&& (now - fLibinputLastClickTime) < fSettings.click_speed)
 					fLibinputClickCount++;
 				else
 					fLibinputClickCount = 1;
@@ -1388,7 +1516,32 @@ MouseInputDevice::~MouseInputDevice()
 	CALLED();
 
 	StopMonitoringDevice(kMouseDevicesDirectory);
-	fDevices.MakeEmpty();
+
+	// Detach every device under the lock, then delete them outside it:
+	// ~MouseDevice() may join a control thread via Stop(), and joining
+	// while fDeviceListLock is held can deadlock against that same
+	// thread's own self-removal call (see _ControlThreadCleanup()).
+	BObjectList<MouseDevice, false> doomed;
+	{
+		BAutolock _(fDeviceListLock);
+		for (int32 i = fDevices.CountItems() - 1; i >= 0; i--)
+			doomed.AddItem(fDevices.ItemAt(i));
+		fDevices.MakeEmpty(false);
+	}
+
+	// Unregister before deleting: ~BInputServerDevice() does it too, but
+	// a base destructor runs after this one, so input_server would still
+	// hold cookies pointing at freed devices in between.
+	for (int32 i = 0; i < doomed.CountItems(); i++) {
+		MouseDevice* device = doomed.ItemAt(i);
+
+		input_device_ref* devices[2];
+		devices[0] = device->DeviceRef();
+		devices[1] = NULL;
+		UnregisterDevices(devices);
+
+		delete device;
+	}
 }
 
 
@@ -1437,6 +1590,9 @@ MouseInputDevice::Control(const char* name, void* cookie,
 
 	if (command == B_SET_TOUCHPAD_SETTINGS)
 		return device->UpdateTouchpadSettings(message);
+
+	if (command == B_GET_DEVICE_DESCRIPTION)
+		return device->GetDescription(message);
 
 	if (command >= B_MOUSE_TYPE_CHANGED
 		&& command <= B_MOUSE_ACCELERATION_CHANGED)
@@ -1510,14 +1666,37 @@ MouseInputDevice::_AddDevice(const char* path)
 {
 	CALLED();
 
-	BAutolock _(fDeviceListLock);
+	// The node monitor hands us any entry under /dev/input, not just
+	// device nodes.
+	struct stat st;
+	if (stat(path, &st) != 0 || !S_ISCHR(st.st_mode))
+		return B_BAD_TYPE;
 
+	// Check readiness first, or a node still in the udev window
+	// registers and never produces events.
+	if (access(path, R_OK) != 0 && (errno == EACCES || errno == EPERM))
+		return B_PERMISSION_DENIED;
+
+	// Detach and delete any stale device already at this path (fast
+	// replug) before the lock below is taken: _RemoveDevice() may join
+	// that device's control thread via Stop(), and that must happen
+	// without fDeviceListLock held, see _DetachDevice().
 	_RemoveDevice(path);
+
+	BAutolock _(fDeviceListLock);
 
 	MouseDevice* device = new(std::nothrow) MouseDevice(*this, path);
 	if (device == NULL) {
 		TRACE("No memory\n");
 		return B_NO_MEMORY;
+	}
+
+	// Classify before registering, so non-pointing devices never
+	// reach Input preferences.
+	status_t classifyStatus = device->_Classify();
+	if (classifyStatus != B_OK) {
+		delete device;
+		return classifyStatus;
 	}
 
 	if (!fDevices.AddItem(device)) {
@@ -1536,18 +1715,47 @@ MouseInputDevice::_AddDevice(const char* path)
 }
 
 
-status_t
-MouseInputDevice::_RemoveDevice(const char* path)
+MouseDevice*
+MouseInputDevice::_DetachDevice(const char* path, const int32* serial)
 {
 	CALLED();
 
-	BAutolock _(fDeviceListLock);
-	MouseDevice* device = _FindDevice(path);
-	if (device == NULL) {
-		TRACE("%s not found\n", path);
-		return B_ENTRY_NOT_FOUND;
+	MouseDevice* device = NULL;
+	{
+		BAutolock _(fDeviceListLock);
+
+		device = _FindDevice(path);
+		if (device == NULL) {
+			TRACE("%s not found\n", path);
+			return NULL;
+		}
+
+		// ABA guard: a replacement can land on the same address, so
+		// serial, not pointer.
+		if (serial != NULL && device->Serial() != *serial) {
+			TRACE("%s: stale removal (serial %ld != %ld), ignoring\n", path,
+				(long)*serial, (long)device->Serial());
+			return NULL;
+		}
+
+		// Detach only, don't delete: the caller deletes outside the lock,
+		// so ~MouseDevice()'s Stop() can join the control thread without
+		// holding fDeviceListLock. Holding it there would deadlock
+		// against the control thread's own self-removal call into
+		// _RemoveDevice(), which needs the same lock (see
+		// _ControlThreadCleanup()).
+		fDevices.RemoveItem(device, false);
 	}
 
+	// Outside the lock for two reasons. UnregisterDevices() makes
+	// input_server call BInputServerDevice::Stop(), which joins the
+	// control thread; that join must not happen under fDeviceListLock or
+	// it deadlocks against the same thread's self-removal. And it takes
+	// InputServer::fInputDeviceListLocker, which input_server already
+	// holds when it calls into Control() (InputServer.cpp:1496,:1504),
+	// so acquiring it under fDeviceListLock inverts the established
+	// order. The device is off the list but still alive here, so a
+	// callback arriving with the cookie in this window is safe.
 	input_device_ref* devices[2];
 	devices[0] = device->DeviceRef();
 	devices[1] = NULL;
@@ -1556,7 +1764,29 @@ MouseInputDevice::_RemoveDevice(const char* path)
 
 	UnregisterDevices(devices);
 
-	fDevices.RemoveItem(device);
+	return device;
+}
 
+
+status_t
+MouseInputDevice::_RemoveDevice(const char* path)
+{
+	MouseDevice* device = _DetachDevice(path, NULL);
+	if (device == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	delete device;
+	return B_OK;
+}
+
+
+status_t
+MouseInputDevice::_RemoveDevice(const char* path, int32 serial)
+{
+	MouseDevice* device = _DetachDevice(path, &serial);
+	if (device == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	delete device;
 	return B_OK;
 }
