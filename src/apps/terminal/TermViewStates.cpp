@@ -1,6 +1,7 @@
 /*
  * Copyright 2001-2015, Haiku, Inc.
  * Copyright 2003-2004 Kian Duffy, myob@users.sourceforge.net
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Parts Copyright 1998-1999 Kazuho Okui and Takashi Murai.
  * All rights reserved. Distributed under the terms of the MIT license.
  *
@@ -12,6 +13,7 @@
  *		Ingo Weinhold, ingo_weinhold@gmx.de
  *		Clemens Zeidler, haiku@Clemens-Zeidler.de
  *		Siarzhuk Zharski, zharik@gmx.li
+ *		Dario Casalinuovo
  */
 
 
@@ -196,6 +198,31 @@ TermView::DefaultState::ModifiersChanged(int32 oldModifiers, int32 modifiers)
 }
 
 
+//! The control character a key produces when Control is held, or -1.
+static int
+control_character_for(int32 rawChar)
+{
+	// Digits deliberately absent: Terminal binds Command+1..9 to tab
+	// switching.
+	if (rawChar >= 'a' && rawChar <= 'z')
+		return rawChar - 'a' + 1;
+	if (rawChar >= 'A' && rawChar <= 'Z')
+		return rawChar - 'A' + 1;
+
+	switch (rawChar) {
+		case '@':	return 0x00;
+		case '[':	return 0x1b;
+		case '\\':	return 0x1c;
+		case ']':	return 0x1d;
+		case '^':	return 0x1e;
+		case '_':	return 0x1f;
+		case '?':	return 0x7f;
+	}
+
+	return -1;
+}
+
+
 void
 TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 {
@@ -211,6 +238,21 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 	currentMessage->FindInt32("raw_char", &rawChar);
 
 	fView->_ActivateCursor(true);
+
+	// ctrl mode: Command sits on the physical Control key, so Command+letter
+	// is owed to the shell as a control character (^C, ^D, ^L). Not needed
+	// in Haiku's arrangement, where Control is free and arrives as
+	// B_CONTROL_KEY already.
+	if (fView->CommandIsControlKey()
+		&& (mod & (B_COMMAND_KEY | B_SHIFT_KEY)) == B_COMMAND_KEY) {
+		int control = control_character_for(rawChar);
+		if (control >= 0) {
+			char byte = (char)control;
+			fView->_ScrollTo(0, true);
+			fView->fShell->Write(&byte, 1);
+			return;
+		}
+	}
 
 	// Handle the Option key when used as Meta
 	bool interpretMetaKey = fView->TextBuffer()->IsMode(MODE_INTERPRET_META_KEY);
@@ -285,6 +327,11 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 	// Terminal filters RET, ENTER, F1...F12, and ARROW key code.
 	const char *toWrite = NULL;
 
+	// ctrl mode: physical Control arrives as B_COMMAND_KEY, so "is Control
+	// held" below must accept either.
+	const bool controlPressed = (mod & B_CONTROL_KEY) != 0
+		|| (fView->CommandIsControlKey() && (mod & B_COMMAND_KEY) != 0);
+
 	switch (*bytes) {
 		case B_RETURN:
 			if (rawChar == B_RETURN)
@@ -306,7 +353,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			if (rawChar == B_LEFT_ARROW) {
 				if ((mod & B_SHIFT_KEY) != 0)
 					toWrite = SHIFT_LEFT_ARROW_KEY_CODE;
-				else if ((mod & B_CONTROL_KEY) != 0)
+				else if (controlPressed)
 					toWrite = CTRL_LEFT_ARROW_KEY_CODE;
 				else
 					toWrite = LEFT_ARROW_KEY_CODE;
@@ -317,7 +364,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			if (rawChar == B_RIGHT_ARROW) {
 				if ((mod & B_SHIFT_KEY) != 0)
 					toWrite = SHIFT_RIGHT_ARROW_KEY_CODE;
-				else if ((mod & B_CONTROL_KEY) != 0)
+				else if (controlPressed)
 					toWrite = CTRL_RIGHT_ARROW_KEY_CODE;
 				else
 					toWrite = RIGHT_ARROW_KEY_CODE;
@@ -325,7 +372,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			break;
 
 		case B_UP_ARROW:
-			if ((mod & B_CONTROL_KEY) && (mod & B_SHIFT_KEY)) {
+			if (controlPressed && (mod & B_SHIFT_KEY) != 0) {
 				fView->_ScrollTo(fView->fScrollOffset - fView->fFontHeight, true);
 				return;
 			}
@@ -333,7 +380,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			if (rawChar == B_UP_ARROW) {
 				if ((mod & B_SHIFT_KEY) != 0)
 					toWrite = SHIFT_UP_ARROW_KEY_CODE;
-				else if (mod & B_CONTROL_KEY)
+				else if (controlPressed)
 					toWrite = CTRL_UP_ARROW_KEY_CODE;
 				else
 					toWrite = UP_ARROW_KEY_CODE;
@@ -341,7 +388,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			break;
 
 		case B_DOWN_ARROW:
-			if ((mod & B_CONTROL_KEY) && (mod & B_SHIFT_KEY)) {
+			if (controlPressed && (mod & B_SHIFT_KEY) != 0) {
 				fView->_ScrollTo(fView->fScrollOffset + fView->fFontHeight, true);
 				return;
 			}
@@ -349,7 +396,7 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 			if (rawChar == B_DOWN_ARROW) {
 				if ((mod & B_SHIFT_KEY) != 0)
 					toWrite = SHIFT_DOWN_ARROW_KEY_CODE;
-				else if (mod & B_CONTROL_KEY)
+				else if (controlPressed)
 					toWrite = CTRL_DOWN_ARROW_KEY_CODE;
 				else
 					toWrite = DOWN_ARROW_KEY_CODE;

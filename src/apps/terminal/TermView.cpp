@@ -1,6 +1,7 @@
 /*
  * Copyright 2001-2025, Haiku, Inc. All rights reserved.
  * Copyright 2003-2004 Kian Duffy, myob@users.sourceforge.net
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Parts Copyright 1998-1999 Kazuho Okui and Takashi Murai.
  * All rights reserved. Distributed under the terms of the MIT license.
  *
@@ -13,6 +14,7 @@
  *		Ingo Weinhold, ingo_weinhold@gmx.de
  *		Clemens Zeidler, haiku@Clemens-Zeidler.de
  *		Siarzhuk Zharski, zharik@gmx.li
+ *		Dario Casalinuovo
  */
 
 
@@ -745,6 +747,25 @@ TermView::SetKeymap(const key_map* keymap, const char* chars)
 		&fKeymap->caps_shift_map);
 	fKeymapTableForModifiers.Put(B_CONTROL_KEY,
 		&fKeymap->control_map);
+}
+
+
+bool
+command_is_control_key(const key_map* keymap)
+{
+	if (keymap == NULL)
+		return false;
+
+	// Haiku keycode for left Control; every key_map source, including the
+	// built-in kSystemKeymap fallback (see SystemKeymap.h), agrees on it.
+	return keymap->left_command_key == 0x5c;
+}
+
+
+bool
+TermView::CommandIsControlKey() const
+{
+	return command_is_control_key(fKeymap);
 }
 
 

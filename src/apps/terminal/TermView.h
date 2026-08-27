@@ -1,6 +1,7 @@
 /*
  * Copyright 2001-2023, Haiku, Inc. All rights reserved.
  * Copyright (c) 2003-4 Kian Duffy <myob@users.sourceforge.net>
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Parts Copyright (C) 1998,99 Kazuho Okui and Takashi Murai.
  *
  * Distributed under the terms of the MIT license.
@@ -10,6 +11,7 @@
  *		Simon South, simon@simonsouth.net
  *		Ingo Weinhold, ingo_weinhold@gmx.de
  *		Siarzhuk Zharski, zharik@gmx.li
+ *		Dario Casalinuovo
  */
 #ifndef TERMVIEW_H
 #define TERMVIEW_H
@@ -44,6 +46,11 @@ class ShellParameters;
 class TermBuffer;
 class TerminalBuffer;
 class Shell;
+
+
+// ctrl mode: true when Command sits on the physical Control key (Haiku's
+// own default puts it on Alt).
+bool command_is_control_key(const key_map* keymap);
 
 
 class TermView : public BView, private TermViewHighlighter {
@@ -105,6 +112,9 @@ public:
 
 			void				SetKeymap(const key_map* keymap,
 									const char* chars);
+
+			//! Shorthand for command_is_control_key(fKeymap).
+			bool				CommandIsControlKey() const;
 			void				SetUseOptionAsMetaKey(bool enable);
 
 			void				SetMouseClipboard(BClipboard *);
