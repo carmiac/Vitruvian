@@ -1,4 +1,12 @@
-add_library(switch_workspace SHARED SwitchWorkspaceInputFilter.cpp)
-target_link_libraries(switch_workspace be)
+AddOn(
+	switch_workspace
+	SHARED
+
+	LIBS
+	be
+
+	SOURCES
+	SwitchWorkspaceInputFilter.cpp
+)
+
 UsePrivateHeaders(switch_workspace input app interface)
-set_target_properties(switch_workspace PROPERTIES PREFIX "")

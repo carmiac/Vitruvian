@@ -1,2 +1,2 @@
 add_subdirectory(devices)
-#add_subdirectory(filters)
+add_subdirectory(filters)

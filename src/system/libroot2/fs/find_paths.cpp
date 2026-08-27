@@ -1,6 +1,7 @@
 /*
  * Copyright 2015, Axel Dörfler, axeld@pinc-software.de.
  * Copyright 2013, Ingo Weinhold, ingo_weinhold@gmx.de.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  */
 
@@ -25,7 +26,7 @@
 #include "PathBuffer.h"
 
 
-static size_t kHomeInstallationLocationIndex = 1;
+static size_t kHomeInstallationLocationIndex = 0;
 
 static const path_base_directory kArchitectureSpecificBaseDirectories[] = {
 	B_FIND_PATH_ADD_ONS_DIRECTORY,
@@ -42,59 +43,52 @@ static size_t kArchitectureSpecificBaseDirectoryCount =
 namespace {
 
 
+// The roots find_path() and find_paths() search, most specific first.
+// Upstream has four (each preceded by a "/non-packaged" sibling for
+// packagefs); Vitruvian has no packagefs, so find_directory() already
+// answers B_ENTRY_NOT_FOUND for every B_*_NONPACKAGED_* constant, and
+// keeping them here too would disagree with that.
 struct InstallationLocations {
 public:
-	static const size_t	kCount = 4;
+	static const size_t	kCount = 2;
 
 public:
 	InstallationLocations()
 		:
 		fReferenceCount(1)
 	{
-		fLocations[0] = kUserNonpackagedDirectory;
-		fLocations[1] = kUserConfigDirectory;
-		fLocations[2] = kSystemNonpackagedDirectory;
-		fLocations[3] = kSystemDirectory;
+		fLocations[0] = kUserConfigDirectory;
+		fLocations[1] = kSystemDirectory;
 	}
 
 	InstallationLocations(const char* home)
 		:
 		fReferenceCount(1)
 	{
-		static const char* const kNonPackagedSuffix = "/non-packaged";
-		char* homeNonPackaged
-			= (char*)malloc(strlen(home) + strlen(kNonPackagedSuffix) + 1);
-		fLocations[0] = homeNonPackaged;
-		if (homeNonPackaged != NULL) {
-			strcpy(homeNonPackaged, home);
-			strcat(homeNonPackaged, kNonPackagedSuffix);
-		}
-
-		fLocations[1] = strdup(home);
-
-		fLocations[2] = kSystemNonpackagedDirectory;
-		fLocations[3] = kSystemDirectory;
+		fLocations[0] = strdup(home);
+		fLocations[1] = kSystemDirectory;
 	}
 
 	~InstallationLocations()
 	{
+		// Only the home location is ever allocated; the system one is a
+		// string constant.
 		free(const_cast<char*>(fLocations[0]));
-		free(const_cast<char*>(fLocations[1]));
 	}
 
 	bool IsValid() const
 	{
-		return fLocations[0] != NULL && fLocations[1] != NULL;
+		return fLocations[0] != NULL;
 	}
 
 	bool IsUserIndex(size_t index) const
 	{
-		return index==0 || index==1;
+		return index == 0;
 	}
 
 	bool IsSystemIndex(size_t index) const
 	{
-		return index==2 || index==3;
+		return index == 1;
 	}
 
 	static InstallationLocations* Default()

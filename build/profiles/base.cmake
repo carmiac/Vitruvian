@@ -20,26 +20,21 @@ set(INPUT_SERVER_ADDONS
 ImageInclude("/system/add-ons/input_server/devices" ${INPUT_SERVER_ADDONS})
 
 
-#set(INPUT_SERVER_FILTERS
-#    shortcut_catcher
-#    switch_workspace
-#    minimize_all
-#)
-#ImageInclude("/system/add-ons/input_server/filters" ${INPUT_SERVER_FILTERS})
+# Every filter runs on every input message, so this list is hot-path.
+# shortcut_catcher and screen_saver do per-message work (BMessage copy,
+# BAutolock) for features not wired up yet, so they stay out.
+set(INPUT_SERVER_FILTERS
+	switch_workspace
+	minimize_all
+#	shortcut_catcher
+)
+ImageInclude("/system/add-ons/input_server/filters" ${INPUT_SERVER_FILTERS})
 
 
 set(OPENGL_RENDERERS
 	mesa_surfaceless
 )
 ImageInclude("/system/add-ons/opengl" ${OPENGL_RENDERERS})
-
-
-#set(INPUT_SERVER_FILTERS
-#	shortcut_catcher
-#	switch_workspace
-#	minimize_all
-#)
-#ImageInclude("/system/add-ons/input_server/filters" ${INPUT_SERVER_FILTERS})
 
 
 set(SYSTEM_LIBS

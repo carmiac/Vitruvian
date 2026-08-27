@@ -1,9 +1,11 @@
 /*
  * Copyright 2007-2022, Haiku. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Stephan Aßmus <superstippi@gmx.de>
+ *		Dario Casalinuovo
  */
 
 #ifndef GLYPH_LAYOUT_ENGINE_H
@@ -421,8 +423,15 @@ GlyphLayoutEngine::PopulateFallbacks(
 		"Noto Sans CJK JP",
 		"Noto Sans Cherokee",
 		"Noto Sans Symbols",
+		// Debian's fonts-noto-core spells this "Noto Sans Symbols2" (no
+		// space); both spellings listed so this still works on upstream too.
 		"Noto Sans Symbols 2",
+		"Noto Sans Symbols2",
+		"Noto Sans Math",
 		"Noto Emoji",
+		// Last resort, not a Noto family: covers every glyph
+		// kUTF8ControlMap uses so no menu shortcut draws as tofu.
+		"DejaVu Sans",
 	};
 
 	if (!gFontManager->Lock())
