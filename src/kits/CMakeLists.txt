@@ -5,6 +5,10 @@ AddOn(
 	SHARED
 
 	LIBS root icon ${ICU_LIBRARIES} agg ${ZLIB_LIBRARIES} pthread localestub shared systemd
+
+	RDEF
+	CountryFlags.rdef
+	LanguageFlags.rdef
 )
 
 UsePrivateHeaders(be app interface kernel print shared locale libroot shared system)

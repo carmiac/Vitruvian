@@ -9,6 +9,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/random.h>
@@ -22,6 +23,8 @@
 #include <Catalog.h>
 #include <CheckBox.h>
 #include <DiskDeviceRoster.h>
+#include <File.h>
+#include <FindDirectory.h>
 #include <LayoutBuilder.h>
 #include <Locale.h>
 #include <Menu.h>
@@ -29,11 +32,15 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
+#include <InterfaceDefs.h>
+#include <Path.h>
 #include <Screen.h>
 #include <StatusBar.h>
 #include <StringView.h>
 #include <TextControl.h>
 #include <TextView.h>
+
+#include <Keymap.h>
 
 #include "InstallerDefs.h"
 #include "PartitionMenuItem.h"
@@ -619,6 +626,151 @@ InstallerWindow::_ValidateSetup(BString& errorOut)
 }
 
 
+// xkb rule options implied by the running key_map.
+static BString
+current_xkb_options()
+{
+	BString options;
+	key_map* map = NULL;
+	char* buffer = NULL;
+	get_key_map(&map, &buffer);
+	if (map != NULL)
+		options = look_up_xkb_modifier_options(*map);
+
+	free(map);
+	free(buffer);
+	return options;
+}
+
+
+// Handles bare "layout=de" and shell-quoted XKBLAYOUT="de".
+static bool
+read_keyboard_file(const char* path, BString& layout, BString& variant,
+	BString& options)
+{
+	BFile file(path, B_READ_ONLY);
+	off_t size;
+	if (file.InitCheck() != B_OK || file.GetSize(&size) != B_OK || size <= 0)
+		return false;
+
+	if (size > 8192)
+		size = 8192;
+	BString contents;
+	char* buffer = contents.LockBuffer(size + 1);
+	if (buffer == NULL)
+		return false;
+	ssize_t read = file.Read(buffer, size);
+	buffer[read > 0 ? read : 0] = '\0';
+	contents.UnlockBuffer();
+
+	int32 offset = 0;
+	while (offset < contents.Length()) {
+		int32 end = contents.FindFirst('\n', offset);
+		if (end < 0)
+			end = contents.Length();
+
+		BString line;
+		contents.CopyInto(line, offset, end - offset);
+		offset = end + 1;
+
+		int32 equals = line.FindFirst('=');
+		if (equals < 0)
+			continue;
+
+		BString key;
+		BString value;
+		line.CopyInto(key, 0, equals);
+		line.CopyInto(value, equals + 1, line.Length() - equals - 1);
+		key.Trim();
+		value.Trim();
+		value.RemoveAll("\"");
+
+		if (key == "layout" || key == "XKBLAYOUT")
+			layout = value;
+		else if (key == "variant" || key == "XKBVARIANT")
+			variant = value;
+		else if (key == "options" || key == "XKBOPTIONS")
+			options = value;
+	}
+
+	return layout.Length() > 0;
+}
+
+
+// Written by FirstBootPrompt; keep the two in step.
+static const char* kFirstBootHandoffPath = "/run/vos/firstboot.conf";
+
+
+static BString
+first_boot_language()
+{
+	BFile file(kFirstBootHandoffPath, B_READ_ONLY);
+	char buffer[256];
+	ssize_t read = file.InitCheck() == B_OK
+		? file.Read(buffer, sizeof(buffer) - 1) : -1;
+	if (read <= 0)
+		return BString();
+
+	buffer[read] = '\0';
+	BString contents(buffer);
+	int32 start = contents.FindFirst("language=");
+	if (start < 0)
+		return BString();
+
+	start += strlen("language=");
+	int32 end = contents.FindFirst('\n', start);
+	if (end < 0)
+		end = contents.Length();
+
+	BString language;
+	contents.CopyInto(language, start, end - start);
+	language.Trim();
+	return language;
+}
+
+
+// Resolved the same way the keyboard add-on does: input/layout, then the
+// xkb_layout cache, then /etc/default/keyboard.
+static bool
+current_keyboard_layout(BString& layout, BString& variant, BString& options)
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+		BPath namePath(path);
+		namePath.Append("input/layout");
+
+		char name[B_FILE_NAME_LENGTH + 1];
+		BFile file(namePath.Path(), B_READ_ONLY);
+		ssize_t read = file.InitCheck() == B_OK
+			? file.Read(name, sizeof(name) - 1) : -1;
+		if (read > 0) {
+			name[read] = '\0';
+			BString keymapName(name);
+			keymapName.Trim();
+			if (keymapName.Length() > 0) {
+				const char* xkbLayout;
+				const char* xkbVariant;
+				look_up_xkb_layout(keymapName.String(), xkbLayout, xkbVariant);
+				layout = xkbLayout;
+				variant = xkbVariant;
+				// Derived from the running key_map, so the installed
+				// system inherits the arrangement actually in force.
+				options = current_xkb_options();
+				return true;
+			}
+		}
+
+		BPath cachePath(path);
+		cachePath.Append("input/xkb_layout");
+		if (read_keyboard_file(cachePath.Path(), layout, variant, options))
+			return true;
+	}
+
+	return read_keyboard_file("/etc/default/keyboard", layout, variant,
+		options);
+}
+
+
 BString
 InstallerWindow::_ComposeSetupConf()
 {
@@ -626,6 +778,19 @@ InstallerWindow::_ComposeSetupConf()
 	const char* full = fFullNameField->Text();
 	const char* host = fHostnameField->Text();
 	const char* user = fUserField->Text();
+
+	BString language = first_boot_language();
+	if (language.Length() > 0)
+		conf << "language=" << language << "\n";
+
+	BString layout;
+	BString variant;
+	BString options;
+	if (current_keyboard_layout(layout, variant, options)) {
+		conf << "keymap="         << layout  << "\n";
+		conf << "keymap_variant=" << variant << "\n";
+		conf << "keymap_options=" << options << "\n";
+	}
 
 	conf << "username="  << user << "\n";
 	conf << "hostname="  << host << "\n";

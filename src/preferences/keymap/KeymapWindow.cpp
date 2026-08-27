@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2015 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -8,6 +9,7 @@
  *		Jérôme Duval
  *		John Scipione, jscipione@gmai.com
  *		Sandor Vroemisse
+ *		Dario Casalinuovo
  */
 
 
@@ -23,15 +25,18 @@
 #include <File.h>
 #include <FindDirectory.h>
 #include <LayoutBuilder.h>
+#include <List.h>
 #include <ListView.h>
 #include <Locale.h>
 #include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
+#include <ObjectList.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 #include <Screen.h>
 #include <ScrollView.h>
+#include <StringList.h>
 #include <StringView.h>
 #include <TextControl.h>
 
@@ -49,14 +54,13 @@
 static const uint32 kMsgMenuFileOpen = 'mMFO';
 static const uint32 kMsgMenuFileSaveAs = 'mMFA';
 
-static const uint32 kChangeKeyboardLayout = 'cKyL';
-
 static const uint32 kMsgSwitchShortcuts = 'swSc';
 
 static const uint32 kMsgMenuFontChanged = 'mMFC';
 
 static const uint32 kMsgSystemMapSelected = 'SmST';
 static const uint32 kMsgUserMapSelected = 'UmST';
+static const uint32 kMsgModelSelected = 'MdST';
 
 static const uint32 kMsgDefaultKeymap = 'Dflt';
 static const uint32 kMsgRevertKeymap = 'Rvrt';
@@ -84,11 +88,78 @@ compare_key_list_items(const void* a, const void* b)
 	return BLocale::Default()->StringCompare(item1->Text(), item2->Text());
 }
 
+
+// A Generic row's XkbId() has no variant part, i.e. no second colon
+// after the "xkb:" prefix. Checked structurally rather than against the
+// translated label.
+static bool
+is_generic_xkb_id(const BString& id)
+{
+	int32 firstColon = id.FindFirst(':');
+	if (firstColon < 0)
+		return false;
+
+	return id.FindFirst(':', firstColon + 1) < 0;
+}
+
+
+// BOutlineListView's sort hooks take BListItem* pairs, not void* pairs.
+static int
+compare_key_list_items_outline(const BListItem* a, const BListItem* b)
+{
+	const KeymapListItem* item1 = static_cast<const KeymapListItem*>(a);
+	const KeymapListItem* item2 = static_cast<const KeymapListItem*>(b);
+
+	// Sort the Generic row before its siblings rather than alphabetically.
+	bool generic1 = is_generic_xkb_id(item1->XkbId());
+	bool generic2 = is_generic_xkb_id(item2->XkbId());
+	if (generic1 != generic2)
+		return generic1 ? -1 : 1;
+
+	return BLocale::Default()->StringCompare(item1->Text(), item2->Text());
+}
+
+
+// Mirrors KeyboardInputDevice::_RebuildXkb()'s reading of the same file, so
+// the model menu opens already marking what is actually in effect.
+static void
+read_persisted_xkb_model(BString& _model)
+{
+	_model = "";
+
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+		return;
+	path.Append("input/xkb_layout");
+
+	FILE* file = fopen(path.Path(), "r");
+	if (file == NULL)
+		return;
+
+	static const char* kKey = "model=";
+	size_t keyLen = strlen(kKey);
+
+	char line[512];
+	while (fgets(line, sizeof(line), file) != NULL) {
+		char* newline = strchr(line, '\n');
+		if (newline != NULL)
+			*newline = '\0';
+
+		if (strncmp(line, kKey, keyLen) == 0) {
+			_model = line + keyLen;
+			break;
+		}
+	}
+
+	fclose(file);
+}
+
 KeymapWindow::KeymapWindow()
 	:
 	BWindow(BRect(80, 50, kDefaultWidth, kDefaultHeight),
 		B_TRANSLATE_SYSTEM_NAME("Keymap"), B_TITLED_WINDOW,
-		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS)
+		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
+	fUserPickedLayout(false)
 {
 	// If the window doesn't fit the screen, make it smaller but keep the
 	// aspect ratio
@@ -101,6 +172,12 @@ KeymapWindow::KeymapWindow()
 		ResizeTo(mode.virtual_width - 64,
 			width * kDefaultHeight / kDefaultWidth);
 	}
+
+	// So the model menu opens already marking what is actually in effect.
+	BString persistedModel;
+	read_persisted_xkb_model(persistedModel);
+	if (!persistedModel.IsEmpty())
+		fCurrentMap.SetModel(persistedModel.String());
 
 	fKeyboardLayoutView = new KeyboardLayoutView("layout");
 	fKeyboardLayoutView->SetKeymap(&fCurrentMap);
@@ -159,11 +236,13 @@ KeymapWindow::KeymapWindow()
 	else
 		get_ref_for_path(path.Path(), &ref);
 
+#ifndef __VOS__
 	BMessenger messenger(this);
 	fOpenPanel = new BFilePanel(B_OPEN_PANEL, &messenger, &ref,
 		B_FILE_NODE, false, NULL);
 	fSavePanel = new BFilePanel(B_SAVE_PANEL, &messenger, &ref,
 		B_FILE_NODE, false, NULL);
+#endif
 
 	BRect windowFrame;
 	if (_LoadSettings(windowFrame) == B_OK) {
@@ -190,6 +269,8 @@ KeymapWindow::KeymapWindow()
 	fAppliedMap = fCurrentMap;
 	fCurrentMap.SetTarget(this, new BMessage(kMsgKeymapUpdated));
 
+	_AutoPickKeyboardTemplate();
+
 	_UpdateButtons();
 
 	_UpdateDeadKeyMenu();
@@ -201,8 +282,10 @@ KeymapWindow::KeymapWindow()
 
 KeymapWindow::~KeymapWindow()
 {
+#ifndef __VOS__
 	delete fOpenPanel;
 	delete fSavePanel;
+#endif
 }
 
 
@@ -235,6 +318,7 @@ KeymapWindow::MessageReceived(BMessage* message)
 			break;
 		}
 
+#ifndef __VOS__
 		case B_SAVE_REQUESTED:
 		{
 			entry_ref ref;
@@ -260,24 +344,65 @@ KeymapWindow::MessageReceived(BMessage* message)
 		case kMsgMenuFileSaveAs:
 			fSavePanel->Show();
 			break;
+#endif
 		case kMsgShowModifierKeysWindow:
 			be_app->PostMessage(kMsgShowModifierKeysWindow);
 			break;
 
-		case kChangeKeyboardLayout:
-		{
-			entry_ref ref;
-			BPath path;
-			if (message->FindRef("ref", &ref) == B_OK)
-				path.SetTo(&ref);
-
-			_SetKeyboardLayout(path.Path());
-			break;
-		}
-
 		case kMsgSwitchShortcuts:
 			_SwitchShortcutKeys();
 			break;
+
+		case kMsgModelSelected:
+		{
+			// A shape-only entry means exactly that: redraw, touch nothing
+			// xkb knows about.
+			BString shape;
+			if (message->FindString("model:shape", &shape) == B_OK) {
+				BPath shapePath;
+				if (_FindKeyboardLayoutPath(shape.String(), shapePath)
+						== B_OK) {
+					fUserPickedLayout = true;
+					_SetKeyboardLayout(shapePath.Path());
+				}
+				break;
+			}
+
+			BString id;
+			if (message->FindString("model:id", &id) != B_OK)
+				break;
+
+			// Choosing a real model is a fresh answer to "what keyboard is
+			// this", so it takes the drawing back from any hand-picked shape.
+			fUserPickedLayout = false;
+
+			const char* layout;
+			const char* variant;
+			look_up_xkb_layout(fCurrentMap.LayoutName(), layout, variant);
+			const char* options
+				= look_up_xkb_modifier_options(fCurrentMap.Map());
+
+			// Compile before committing the model, or a pair xkb rejects
+			// leaves the menu marking a model that is not in effect.
+			BString previousModel(fCurrentMap.Model());
+			fCurrentMap.SetModel(id.String());
+
+			if (fCurrentMap.PopulateFromXkbNames("evdev", fCurrentMap.Model(),
+					layout, variant, options) != B_OK) {
+				fCurrentMap.SetModel(previousModel.String());
+				_MarkCurrentModel();
+				break;
+			}
+
+			fAppliedMap = fCurrentMap;
+			fKeyboardLayoutView->SetKeymap(&fCurrentMap);
+			// _UseKeymap() already writes the xkb layout and activates
+			// once; see its body.
+			_UseKeymap();
+			_AutoPickKeyboardTemplate();
+			_UpdateButtons();
+			break;
+		}
 
 		case kMsgMenuFontChanged:
 		{
@@ -292,43 +417,54 @@ KeymapWindow::MessageReceived(BMessage* message)
 		}
 
 		case kMsgSystemMapSelected:
-		case kMsgUserMapSelected:
 		{
-			BListView* listView;
-			BListView* otherListView;
-
-			if (message->what == kMsgSystemMapSelected) {
-				listView = fSystemListView;
-				otherListView = fUserListView;
-			} else {
-				listView = fUserListView;
-				otherListView = fSystemListView;
-			}
-
-			int32 index = listView->CurrentSelection();
+			// Every row is xkb-derived now, so this always routes through
+			// _XkbLayoutSelected() instead of duplicating its logic.
+			int32 index = fSystemListView->CurrentSelection();
 			if (index < 0)
 				break;
 
-			// Deselect item in other BListView
-			otherListView->DeselectAll();
+			fUserListView->DeselectAll();
 
-			if (index == 0 && listView == fUserListView) {
+			KeymapListItem* item = static_cast<KeymapListItem*>(
+				fSystemListView->ItemAt(index));
+			if (item != NULL) {
+				_XkbLayoutSelected(item->XkbId().String(),
+					item->EntryRef().name);
+			}
+
+			break;
+		}
+
+		case kMsgUserMapSelected:
+		{
+			int32 index = fUserListView->CurrentSelection();
+			if (index < 0)
+				break;
+
+			// Deselect item in the other list
+			fSystemListView->DeselectAll();
+
+			if (index == 0) {
 				// we can safely ignore the "(Current)" item
 				break;
 			}
 
 			KeymapListItem* item
-				= static_cast<KeymapListItem*>(listView->ItemAt(index));
+				= static_cast<KeymapListItem*>(fUserListView->ItemAt(index));
 			if (item != NULL) {
 				status_t status = fCurrentMap.Load(item->EntryRef());
 				if (status != B_OK) {
-					listView->RemoveItem(item);
+					fUserListView->RemoveItem(item);
 					break;
 				}
 
 				fAppliedMap = fCurrentMap;
 				fKeyboardLayoutView->SetKeymap(&fCurrentMap);
+				// _UseKeymap() already writes the xkb layout and
+				// activates once; see its body.
 				_UseKeymap();
+				_AutoPickKeyboardTemplate();
 				_UpdateButtons();
 			}
 			break;
@@ -418,6 +554,10 @@ KeymapWindow::MessageReceived(BMessage* message)
 			if (message->FindUInt32("scroll_key", &keyCode) == B_OK)
 				fCurrentMap.SetModifier(unset ? 0x00 : keyCode, B_SCROLL_LOCK);
 
+			// Without this the new role reaches key_map but never
+			// character generation. Write it before _UpdateButtons(),
+			// whose _UseKeymap() is the one activation this path gets.
+			fCurrentMap.WriteXkbLayout();
 			_UpdateButtons();
 			fKeyboardLayoutView->SetKeymap(&fCurrentMap);
 			break;
@@ -508,11 +648,13 @@ KeymapWindow::_CreateMenu()
 
 	// Create the File menu
 	BMenu* menu = new BMenu(B_TRANSLATE("File"));
+#ifndef __VOS__
 	menu->AddItem(new BMenuItem(B_TRANSLATE("Open" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgMenuFileOpen), 'O'));
 	menu->AddItem(new BMenuItem(B_TRANSLATE("Save as" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgMenuFileSaveAs)));
 	menu->AddSeparatorItem();
+#endif
 	menu->AddItem(new BMenuItem(
 		B_TRANSLATE("Set modifier keys" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgShowModifierKeysWindow)));
@@ -521,10 +663,11 @@ KeymapWindow::_CreateMenu()
 		new BMessage(B_QUIT_REQUESTED), 'Q'));
 	menuBar->AddItem(menu);
 
-	// Create keyboard layout menu
-	fLayoutMenu = new BMenu(B_TRANSLATE("Layout"));
-	_AddKeyboardLayouts(fLayoutMenu);
-	menuBar->AddItem(fLayoutMenu);
+	// Create keyboard model menu
+	fModelMenu = new BMenu(B_TRANSLATE("Keyboard model"));
+	_AddModelMenu(fModelMenu);
+	_MarkCurrentModel();
+	menuBar->AddItem(fModelMenu);
 
 	// Create the Font menu
 	fFontMenu = new BMenu(B_TRANSLATE("Font"));
@@ -606,11 +749,62 @@ KeymapWindow::_CreateDeadKeyMenuField()
 }
 
 
+// BOutlineListView::Expand()/Collapse() are not virtual; override
+// ExpandOrCollapse() to guard the collapse side against the base class
+// reselecting a hidden variant's parent. Expanding never changes the
+// selection.
+class SystemListView : public BOutlineListView {
+public:
+								SystemListView();
+
+protected:
+	virtual	void				ExpandOrCollapse(BListItem* item,
+									bool expand);
+};
+
+
+SystemListView::SystemListView()
+	:
+	BOutlineListView("systemList")
+{
+}
+
+
+void
+SystemListView::ExpandOrCollapse(BListItem* item, bool expand)
+{
+	KeymapListItem* base = static_cast<KeymapListItem*>(item);
+	KeymapListItem* selected = static_cast<KeymapListItem*>(
+		ItemAt(CurrentSelection()));
+
+	if (expand) {
+		BOutlineListView::ExpandOrCollapse(item, expand);
+		return;
+	}
+
+	// Don't let the base class fall back to the parent on collapse (would
+	// silently apply the plain layout). Deselect first to prevent
+	// reselection; the Generic child is the exception, since it shares
+	// its parent's xkb id.
+	bool selectedIsUnder = selected != NULL && Superitem(selected) == item;
+	bool selectedIsGeneric = selectedIsUnder
+		&& selected->XkbId() == base->XkbId();
+
+	if (selectedIsUnder && !selectedIsGeneric)
+		selected->Deselect();
+
+	BOutlineListView::ExpandOrCollapse(item, expand);
+
+	if (selectedIsGeneric && CurrentSelection() != IndexOf(item))
+		Select(IndexOf(item));
+}
+
+
 BView*
 KeymapWindow::_CreateMapLists()
 {
-	// The System list
-	fSystemListView = new BListView("systemList");
+	// The System list: base layouts as parents, variants as children.
+	fSystemListView = new SystemListView();
 	fSystemListView->SetSelectionMessage(new BMessage(kMsgSystemMapSelected));
 
 	BScrollView* systemScroller = new BScrollView("systemScrollList",
@@ -639,8 +833,58 @@ KeymapWindow::_CreateMapLists()
 }
 
 
-void
-KeymapWindow::_AddKeyboardLayouts(BMenu* menu)
+// Geometry file for each xkb model we ship; others fall back to an
+// ISO/ANSI guess.
+static const struct {
+	const char*	model;
+	const char*	geometry;
+} kModelGeometry[] = {
+	{ "pc104",			"Generic 104-key" },
+	{ "pc104alt",		"Generic 104-key" },
+	{ "pc105",			"Generic 105-key International" },
+	{ "thinkpad",		"ThinkPad" },
+	{ "thinkpad60",		"ThinkPad" },
+	{ "thinkpadz60",	"ThinkPad" },
+	{ "applealu_ansi",	"Apple Aluminum" },
+	{ "applealu_iso",	"Apple Aluminum" },
+	{ "applealu_jis",	"Apple Aluminum" },
+	{ "kinesis",		"Kinesis Advantage" },
+	{ "tm2030PS2",		"TypeMatrix 2030" },
+	{ "tm2030USB",		"TypeMatrix 2030" },
+	{ "tm2030USB-102",	"TypeMatrix 2030" },
+	{ "tm2030USB-106",	"TypeMatrix 2030" },
+};
+
+// Shapes we ship that xkb has no model for; picking one changes only
+// the drawing, not the xkb model.
+static const char* kShapeOnlyGeometries[] = {
+	"Fizzbook NL2",
+	"Kinesis Ergo Elan International",
+	"X-Bows Nature",
+};
+
+
+static const char*
+geometry_for_model(const char* model)
+{
+	if (model == NULL)
+		return NULL;
+
+	for (size_t i = 0;
+			i < sizeof(kModelGeometry) / sizeof(kModelGeometry[0]); i++) {
+		if (strcmp(kModelGeometry[i].model, model) == 0)
+			return kModelGeometry[i].geometry;
+	}
+
+	return NULL;
+}
+
+
+/*!	Looks up a named keyboard layout file under the data directories, without
+	going through a menu.
+*/
+status_t
+KeymapWindow::_FindKeyboardLayoutPath(const char* name, BPath& _path)
 {
 	directory_which dataDirectories[] = {
 		B_USER_NONPACKAGED_DATA_DIRECTORY,
@@ -654,68 +898,126 @@ KeymapWindow::_AddKeyboardLayouts(BMenu* menu)
 		BPath path;
 		if (find_directory(dataDirectories[i], &path) != B_OK)
 			continue;
-
 		if (path.Append("KeyboardLayouts") != B_OK)
 			continue;
+		if (path.Append(name) != B_OK)
+			continue;
 
-		BDirectory directory;
-		if (directory.SetTo(path.Path()) == B_OK)
-			_AddKeyboardLayoutMenu(menu, directory);
+		BEntry entry(path.Path());
+		if (entry.Exists()) {
+			_path = path;
+			return B_OK;
+		}
 	}
+
+	return B_ENTRY_NOT_FOUND;
 }
 
 
-/*!	Adds a menu populated with the keyboard layouts found in the passed
-	in directory to the passed in menu. Each subdirectory in the passed
-	in directory is added as a submenu recursively.
+/*!	Picks the drawn geometry from the selected model when we ship its shape,
+	otherwise from whether the current keymap has a 102nd key (ISO) or not
+	(ANSI). A shape picked by hand wins over both for the rest of the session.
 */
 void
-KeymapWindow::_AddKeyboardLayoutMenu(BMenu* menu, BDirectory directory)
+KeymapWindow::_AutoPickKeyboardTemplate()
 {
-	entry_ref ref;
+	if (fUserPickedLayout)
+		return;
 
-	while (directory.GetNextRef(&ref) == B_OK) {
-		if (menu->FindItem(ref.name) != NULL)
+	const char* named = geometry_for_model(fCurrentMap.Model());
+	if (named != NULL) {
+		BPath namedPath;
+		if (_FindKeyboardLayoutPath(named, namedPath) == B_OK) {
+			_SetKeyboardLayout(namedPath.Path());
+			return;
+		}
+	}
+
+	char* chars = NULL;
+	int32 numBytes = 0;
+	fCurrentMap.GetChars(0x69, 0, 0, &chars, &numBytes);
+	bool hasIsoKey = chars != NULL && numBytes > 0;
+	delete[] chars;
+
+	BPath path;
+	const char* generic = hasIsoKey
+		? "Generic 105-key International" : "Generic 104-key";
+	// Unrepresentable keyboard: fall back to the generic shape, since the
+	// previous one would carry the wrong label.
+	if (_FindKeyboardLayoutPath(generic, path) != B_OK)
+		_SetKeyboardLayout(NULL);
+	else
+		_SetKeyboardLayout(path.Path());
+}
+
+
+/*!	Marks the model actually in effect. Kept apart from _AddModelMenu()
+	so re-marking never requires rebuilding the menu.
+*/
+void
+KeymapWindow::_MarkCurrentModel()
+{
+	if (fModelMenu == NULL)
+		return;
+
+	BString currentModel(fCurrentMap.Model());
+	for (int32 i = 0; i < fModelMenu->CountItems(); i++) {
+		BMenuItem* item = fModelMenu->ItemAt(i);
+		if (item == NULL || item->Message() == NULL)
 			continue;
 
-		BDirectory subdirectory;
-		subdirectory.SetTo(&ref);
-		if (subdirectory.InitCheck() == B_OK) {
-			BMenu* submenu = new BMenu(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-				"KeyboardLayoutNames", NULL));
+		BString id;
+		if (item->Message()->FindString("model:id", &id) != B_OK)
+			continue;
 
-			_AddKeyboardLayoutMenu(submenu, subdirectory);
-			menu->AddItem(submenu, (int32)0);
-		} else {
-			BMessage* message = new BMessage(kChangeKeyboardLayout);
-
-			message->AddRef("ref", &ref);
-			menu->AddItem(new BMenuItem(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-				"KeyboardLayoutNames", NULL), message), (int32)0);
+		if (id == currentModel) {
+			item->SetMarked(true);
+			return;
 		}
 	}
 }
 
 
-/*!	Sets the keyboard layout with the passed in path and marks the
-	corresponding menu item. If the path is not found in the menu this method
-	sets the default keyboard layout and marks the corresponding menu item.
-*/
+void
+KeymapWindow::_AddModelMenu(BMenu* menu)
+{
+	BObjectList<xkb_model_entry, true> catalog;
+	if (get_xkb_model_catalog(catalog) != B_OK)
+		return;
+
+	menu->SetRadioMode(true);
+
+	for (int32 i = 0; i < catalog.CountItems(); i++) {
+		xkb_model_entry* entry = catalog.ItemAt(i);
+
+		BMessage* message = new BMessage(kMsgModelSelected);
+		message->AddString("model:id", entry->id);
+
+		menu->AddItem(new BMenuItem(entry->label.String(), message));
+	}
+
+	// Shapes with no xkb model carry "model:shape" instead of "model:id";
+	// the handler for that case touches only the drawing.
+	menu->AddSeparatorItem();
+	for (size_t i = 0;
+			i < sizeof(kShapeOnlyGeometries) / sizeof(kShapeOnlyGeometries[0]);
+			i++) {
+		BMessage* message = new BMessage(kMsgModelSelected);
+		message->AddString("model:shape", kShapeOnlyGeometries[i]);
+		menu->AddItem(new BMenuItem(kShapeOnlyGeometries[i], message));
+	}
+}
+
+
 status_t
 KeymapWindow::_SetKeyboardLayout(const char* path)
 {
 	status_t status = fKeyboardLayoutView->GetKeyboardLayout()->Load(path);
 
-	// mark a menu item (unmarking all others)
-	_MarkKeyboardLayoutItem(path, fLayoutMenu);
-
-	if (path == NULL || path[0] == '\0' || status != B_OK) {
+	if (path == NULL || path[0] == '\0' || status != B_OK)
 		fKeyboardLayoutView->GetKeyboardLayout()->SetDefault();
-		BMenuItem* item = fLayoutMenu->FindItem(
-			fKeyboardLayoutView->GetKeyboardLayout()->Name());
-		if (item != NULL)
-			item->SetMarked(true);
-	}
+	else
+		fKeyboardLayoutPath = path;
 
 	// Refresh currently set layout
 	fKeyboardLayoutView->SetKeyboardLayout(
@@ -724,40 +1026,44 @@ KeymapWindow::_SetKeyboardLayout(const char* path)
 	return status;
 }
 
-
-/*!	Marks a keyboard layout item by iterating through the menus recursively
-	searching for the menu item with the passed in path. This method always
-	iterates through all menu items and unmarks them. If no item with the
-	passed in path is found it is up to the caller to set the default keyboard
-	layout and mark item corresponding to the default keyboard layout path.
-*/
+// The catalog has no keymap files to Load(), so every row funnels
+// through here to compile live instead.
 void
-KeymapWindow::_MarkKeyboardLayoutItem(const char* path, BMenu* menu)
+KeymapWindow::_XkbLayoutSelected(const char* id, const char* label)
 {
-	BMenuItem* item = NULL;
-	entry_ref ref;
+	if (id == NULL || id[0] == '\0')
+		return;
 
-	for (int32 i = 0; i < menu->CountItems(); i++) {
-		item = menu->ItemAt(i);
-		if (item == NULL)
-			continue;
+	// Base and Generic child share an id; skip the redundant rebuild.
+	// (fCurrentMap.LayoutName() is empty on the first run.)
+	if (strcmp(id, fCurrentMap.LayoutName()) == 0)
+		return;
 
-		// Unmark each item initially
-		item->SetMarked(false);
+	const char* layout;
+	const char* variant;
+	look_up_xkb_layout(id, layout, variant);
 
-		BMenu* submenu = item->Submenu();
-		if (submenu != NULL)
-			_MarkKeyboardLayoutItem(path, submenu);
-		else {
-			if (item->Message()->FindRef("ref", &ref) == B_OK) {
-				BPath layoutPath(&ref);
-				if (path != NULL && path[0] != '\0' && layoutPath == path) {
-					// Found it, mark the item
-					item->SetMarked(true);
-				}
-			}
-		}
+	// Keep the current Ctrl/Command arrangement; the preview must match
+	// _RebuildXkb()'s output.
+	const char* options = look_up_xkb_modifier_options(fCurrentMap.Map());
+	if (fCurrentMap.PopulateFromXkbNames("evdev", fCurrentMap.Model(), layout,
+			variant, options) != B_OK) {
+		return;
 	}
+
+	fCurrentMap.SetName(label != NULL && label[0] != '\0' ? label : id);
+	// The id, not the label, is what look_up_xkb_layout() resolves.
+	fCurrentMap.SetLayoutName(id);
+	fAppliedMap = fCurrentMap;
+	fKeyboardLayoutView->SetKeymap(&fCurrentMap);
+
+	fUserListView->DeselectAll();
+
+	// _UseKeymap() already writes the xkb layout and activates once;
+	// see its body.
+	_UseKeymap();
+	_AutoPickKeyboardTemplate();
+	_UpdateButtons();
 }
 
 
@@ -858,6 +1164,9 @@ KeymapWindow::_SwitchShortcutKeys()
 	fCurrentMap.Map().right_control_key = rightCommand;
 
 	fKeyboardLayoutView->SetKeymap(&fCurrentMap);
+	// Same reason as kMsgUpdateModifierKeys: this is the PC-mode swap, and
+	// it only takes effect for characters once xkb is told about it.
+	fCurrentMap.WriteXkbLayout();
 	_UpdateButtons();
 }
 
@@ -866,6 +1175,8 @@ KeymapWindow::_SwitchShortcutKeys()
 void
 KeymapWindow::_DefaultKeymap()
 {
+	// A real decision (Defaults button); RestoreSystemDefault() writes the
+	// xkb layout and activates once.
 	fCurrentMap.RestoreSystemDefault();
 	fAppliedMap = fCurrentMap;
 
@@ -889,6 +1200,9 @@ KeymapWindow::_RevertKeymap()
 		return;
 	}
 
+	// A real decision (Revert button). Write before activating, so this
+	// costs input_server one xkb recompile rather than two.
+	fPreviousMap.WriteXkbLayout();
 	fPreviousMap.Use();
 	fCurrentMap.Load(ref);
 	fAppliedMap = fCurrentMap;
@@ -913,6 +1227,9 @@ KeymapWindow::_UseKeymap()
 		return;
 	}
 
+	// Write every destination before the one activation below, or
+	// input_server recompiles the whole xkb keymap twice per click.
+	fCurrentMap.WriteXkbLayout();
 	fCurrentMap.Use();
 	fAppliedMap.Load(ref);
 
@@ -920,34 +1237,86 @@ KeymapWindow::_UseKeymap()
 	_SelectCurrentMap();
 }
 
-
 void
 KeymapWindow::_FillSystemMaps()
 {
 	BListItem* item;
-	while ((item = fSystemListView->RemoveItem(static_cast<int32>(0))))
+	while ((item = fSystemListView->RemoveItem(static_cast<int32>(0))) != NULL)
 		delete item;
 
-	// TODO: common keymaps!
-	BPath path;
-	if (find_directory(B_SYSTEM_DATA_DIRECTORY, &path) != B_OK)
+	BObjectList<xkb_catalog_entry, true> catalog;
+	if (get_xkb_layout_catalog(catalog) != B_OK)
 		return;
 
-	path.Append("Keymaps");
+	// evdev.lst lists bases before variants, never adjacent, so key
+	// bases by layout code.
+	BStringList baseCodes;
+	BList baseItems;
 
-	BDirectory directory;
-	entry_ref ref;
+	for (int32 i = 0; i < catalog.CountItems(); i++) {
+		xkb_catalog_entry* entry = catalog.ItemAt(i);
 
-	if (directory.SetTo(path.Path()) == B_OK) {
-		while (directory.GetNextRef(&ref) == B_OK) {
-			fSystemListView->AddItem(
-				new KeymapListItem(ref,
-					B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-					"KeymapNames", NULL)));
+		BString layoutCode(entry->id);
+		layoutCode.Remove(0, 4);	// drop "xkb:"
+		int32 colon = layoutCode.FindFirst(':');
+		bool hasVariant = colon >= 0;
+		BString variantCode;
+		if (hasVariant) {
+			variantCode.SetTo(layoutCode.String() + colon + 1);
+			layoutCode.Truncate(colon);
+		}
+
+		// Prefer the Haiku name; most xkb pairs have none.
+		const char* haikuName = xkb_layout_name_for(layoutCode.String(),
+			variantCode.String());
+		BString label = haikuName != NULL
+			? BString(B_TRANSLATE_NOCOLLECT_ALL(haikuName, "KeymapNames", NULL))
+			: entry->label;
+
+		// expanded = false: the catalog is ~590 rows, so every base layout
+		// starts collapsed. AddUnder() keeps a collapsed parent's children out
+		// of the display list, and the sort below preserves that.
+		KeymapListItem* newItem = new KeymapListItem(entry->id, label.String(),
+			hasVariant ? 1 : 0, false);
+
+		if (!hasVariant) {
+			fSystemListView->AddItem(newItem);
+			baseCodes.Add(layoutCode);
+			baseItems.AddItem(newItem);
+			continue;
+		}
+
+		int32 baseIndex = baseCodes.IndexOf(layoutCode);
+		if (baseIndex >= 0) {
+			fSystemListView->AddUnder(newItem,
+				static_cast<BListItem*>(baseItems.ItemAt(baseIndex)));
+		} else {
+			// A variant whose base the catalog never listed: keep it
+			// reachable at the top level rather than dropping it.
+			fSystemListView->AddItem(newItem);
 		}
 	}
 
-	fSystemListView->SortItems(&compare_key_list_items);
+	// Second pass: give each base a "Generic" child for the plain layout.
+	// (evdev lists bases before variants.)
+	for (int32 i = 0; i < baseItems.CountItems(); i++) {
+		KeymapListItem* base = static_cast<KeymapListItem*>(
+			baseItems.ItemAt(i));
+		if (fSystemListView->CountItemsUnder(base, true) == 0)
+			continue;
+
+		KeymapListItem* generic = new KeymapListItem(base->XkbId(),
+			B_TRANSLATE("Generic"), 1, false);
+		// Display text is "Generic" for every layout, but the saved keymap
+		// name has to stay the base's label or every layout's Generic row
+		// would save under the same useless name.
+		generic->EntryRef().set_name(base->Text());
+		fSystemListView->AddUnder(generic, base);
+	}
+
+	// FullListSortItems() sorts every level in place; plain SortItems() would
+	// flatten the hierarchy.
+	fSystemListView->FullListSortItems(&compare_key_list_items_outline);
 }
 
 
@@ -1027,35 +1396,123 @@ KeymapWindow::_GetActiveKeymapName()
 	return mapName;
 }
 
+//!	The xkb id of the active map, empty when the file predates it.
+BString
+KeymapWindow::_GetActiveLayoutId()
+{
+	BString layoutId;
+
+	entry_ref ref;
+	_GetCurrentKeymap(ref);
+
+	BNode node(&ref);
+	if (node.InitCheck() == B_OK)
+		node.ReadAttrString("keymap:layout", &layoutId);
+
+	return layoutId;
+}
+
 
 bool
-KeymapWindow::_SelectCurrentMap(BListView* view)
+KeymapWindow::_SelectCurrentSystemMap()
 {
 	if (fCurrentMapName.Length() <= 0)
 		return false;
 
-	for (int32 i = 0; i < view->CountItems(); i++) {
-		KeymapListItem* current =
-			static_cast<KeymapListItem *>(view->ItemAt(i));
-		if (current != NULL && fCurrentMapName == current->EntryRef().name) {
-			view->Select(i);
-			view->ScrollToSelection();
+	// A Generic child carries its base row's name, so a name scan would
+	// always land on the base, which comes first. Keep the row the user
+	// actually picked whenever it is one of the matches.
+	KeymapListItem* selected = static_cast<KeymapListItem*>(
+		fSystemListView->ItemAt(fSystemListView->CurrentSelection()));
+	if (selected != NULL && fCurrentMapName == selected->EntryRef().name)
+		return true;
+
+	// Prefer the xkb id. FirstBootPrompt labels its menu from the curated
+	// kXkbLayoutTable while these rows carry evdev.lst descriptions, so a
+	// map it activated has a name no row here uses and only the id
+	// matches. Files written before the id was persisted fall through to
+	// the name scan below.
+	BString layoutId = _GetActiveLayoutId();
+	if (layoutId.FindFirst("xkb:") == 0) {
+		for (int32 i = 0; i < fSystemListView->FullListCountItems(); i++) {
+			KeymapListItem* current = static_cast<KeymapListItem*>(
+				fSystemListView->FullListItemAt(i));
+			if (current == NULL || current->XkbId() != layoutId)
+				continue;
+
+			BListItem* super = fSystemListView->Superitem(current);
+			if (super != NULL)
+				fSystemListView->Expand(super);
+
+			int32 displayIndex = fSystemListView->IndexOf(current);
+			if (displayIndex >= 0
+				&& displayIndex != fSystemListView->CurrentSelection()) {
+				fSystemListView->Select(displayIndex);
+				fSystemListView->ScrollToSelection();
+			}
+
 			return true;
 		}
+	}
+
+	// FullList*: plain ItemAt() walks only expanded rows, so a collapsed
+	// match would be invisible here.
+	for (int32 i = 0; i < fSystemListView->FullListCountItems(); i++) {
+		KeymapListItem* current = static_cast<KeymapListItem*>(
+			fSystemListView->FullListItemAt(i));
+		if (current == NULL || fCurrentMapName != current->EntryRef().name)
+			continue;
+
+		BListItem* super = fSystemListView->Superitem(current);
+		if (super != NULL)
+			fSystemListView->Expand(super);
+
+		int32 displayIndex = fSystemListView->IndexOf(current);
+		// Selecting an already-selected row reposts kMsgSystemMapSelected,
+		// which would apply the same map again; skip it when redundant.
+		if (displayIndex >= 0
+			&& displayIndex != fSystemListView->CurrentSelection()) {
+			fSystemListView->Select(displayIndex);
+			fSystemListView->ScrollToSelection();
+		}
+
+		return true;
 	}
 
 	return false;
 }
 
-
 void
 KeymapWindow::_SelectCurrentMap()
 {
-	if (!_SelectCurrentMap(fSystemListView)
-		&& !_SelectCurrentMap(fUserListView)) {
-		// Select the "(Current)" entry if no name matches
-		fUserListView->Select(0L);
+	if (_SelectCurrentSystemMap())
+		return;
+
+	if (fCurrentMapName.Length() > 0) {
+		for (int32 i = 0; i < fUserListView->CountItems(); i++) {
+			KeymapListItem* current = static_cast<KeymapListItem*>(
+				fUserListView->ItemAt(i));
+			if (current != NULL
+				&& fCurrentMapName == current->EntryRef().name) {
+				// Same repost hazard as the system list: only move the
+				// selection when it would actually change.
+				if (i != fUserListView->CurrentSelection()) {
+					fUserListView->Select(i);
+					fUserListView->ScrollToSelection();
+				}
+				return;
+			}
+		}
 	}
+
+	// The active map may have an unused name (e.g. "(Current)" after an
+	// edit); don't fall back to the user list, or the selection is lost.
+	if (fSystemListView->CurrentSelection() >= 0)
+		return;
+
+	// Select the "(Current)" entry if no name matches
+	if (fUserListView->CurrentSelection() != 0)
+		fUserListView->Select(0L);
 }
 
 
@@ -1101,8 +1558,11 @@ KeymapWindow::_LoadSettings(BRect& windowFrame)
 				windowFrame = frame;
 
 			const char* layoutPath;
-			if (settings.FindString("keyboard layout", &layoutPath) == B_OK)
+			if (settings.FindString("keyboard layout", &layoutPath) == B_OK) {
 				_SetKeyboardLayout(layoutPath);
+				fUserPickedLayout
+					= settings.GetBool("keyboard shape picked", false);
+			}
 		}
 	}
 
@@ -1122,43 +1582,12 @@ KeymapWindow::_SaveSettings()
 	BMessage settings('keym');
 	settings.AddRect("window frame", Frame());
 
-	BPath path = _GetMarkedKeyboardLayoutPath(fLayoutMenu);
-	if (path.InitCheck() == B_OK)
-		settings.AddString("keyboard layout", path.Path());
-
-	return settings.Flatten(&file);
-}
-
-
-/*!	Gets the path of the currently marked keyboard layout item
-	by searching through each of the menus recursively until
-	a marked item is found.
-*/
-BPath
-KeymapWindow::_GetMarkedKeyboardLayoutPath(BMenu* menu)
-{
-	BPath path;
-	BMenuItem* item = NULL;
-	entry_ref ref;
-
-	for (int32 i = 0; i < menu->CountItems(); i++) {
-		item = menu->ItemAt(i);
-		if (item == NULL)
-			continue;
-
-		BMenu* submenu = item->Submenu();
-		if (submenu != NULL) {
-			path = _GetMarkedKeyboardLayoutPath(submenu);
-			if (path.InitCheck() == B_OK)
-				return path;
-		} else {
-			if (item->IsMarked()
-				&& item->Message()->FindRef("ref", &ref) == B_OK) {
-				path.SetTo(&ref);
-				return path;
-			}
-		}
+	// Restore a hand-picked shape only; otherwise the model drives it,
+	// and re-deriving beats a stale path.
+	if (fUserPickedLayout && fKeyboardLayoutPath.Length() > 0) {
+		settings.AddString("keyboard layout", fKeyboardLayoutPath.String());
+		settings.AddBool("keyboard shape picked", true);
 	}
 
-	return path;
+	return settings.Flatten(&file);
 }

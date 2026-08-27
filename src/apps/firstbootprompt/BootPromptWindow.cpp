@@ -32,6 +32,7 @@
 #include <LayoutBuilder.h>
 #include <ListView.h>
 #include <Locale.h>
+#include <LocaleRoster.h>
 #include <Menu.h>
 #include <MutableLocaleRoster.h>
 #include <ObjectList.h>
@@ -61,6 +62,10 @@ namespace BPrivate {
 };
 
 
+// Read by the Installer too; keep the two in step.
+static const char* kFirstBootHandoffPath = "/run/vos/firstboot.conf";
+
+
 static const char* kLanguageKeymapMappings[] = {
 	// While there is a "Dutch" keymap, it apparently has not been widely
 	// adopted, and the US-International keymap is common
@@ -85,12 +90,14 @@ public:
 	LanguageItem(const char* label, const char* language)
 		:
 		BStringItem(label),
-		fLanguage(language)
+		fLanguage(language),
+		fIcon(NULL)
 	{
 	}
 
 	~LanguageItem()
 	{
+		delete fIcon;
 	}
 
 	const char* Language() const
@@ -98,13 +105,74 @@ public:
 		return fLanguage.String();
 	}
 
+	void Update(BView* owner, const BFont* font)
+	{
+		BStringItem::Update(owner, font);
+
+		// Reserve the icon column whether or not a flag is found, so the
+		// labels line up with the rows that have one.
+		float iconSize = Height();
+		SetWidth(Width() + iconSize
+			+ be_control_look->DefaultLabelSpacing());
+
+		// Drop previous bitmap (Update() runs again on font/attach change, preventing leaks)
+		delete fIcon;
+		fIcon = new(std::nothrow) BBitmap(
+			BRect(0, 0, iconSize - 1, iconSize - 1), B_RGBA32);
+		if (fIcon != NULL
+			&& BLocaleRoster::Default()->GetFlagIconForLanguage(fIcon,
+				fLanguage.String()) != B_OK) {
+			delete fIcon;
+			fIcon = NULL;
+		}
+	}
+
 	void DrawItem(BView* owner, BRect frame, bool complete)
 	{
-		BStringItem::DrawItem(owner, frame, true/*complete*/);
+		if (Text() == NULL) {
+			BStringItem::DrawItem(owner, frame, true/*complete*/);
+			return;
+		}
+
+		float iconSize = fIcon != NULL && fIcon->IsValid()
+			? fIcon->Bounds().Width() : Height();
+		float spacing = be_control_look->DefaultLabelSpacing();
+		rgb_color lowColor = owner->LowColor();
+
+		owner->SetLowColor(IsSelected()
+			? ui_color(B_LIST_SELECTED_BACKGROUND_COLOR)
+			: owner->ViewColor());
+		owner->FillRect(frame, B_SOLID_LOW);
+
+		BRect iconFrame(frame.left + spacing, frame.top,
+			frame.left + spacing + iconSize - 1, frame.top + iconSize - 1);
+
+		if (fIcon != NULL && fIcon->IsValid()) {
+			owner->SetDrawingMode(B_OP_OVER);
+			owner->DrawBitmap(fIcon, iconFrame);
+			owner->SetDrawingMode(B_OP_COPY);
+		} else {
+			// No single country to show; draw muted outline as flag slot
+			rgb_color border = ui_color(B_CONTROL_BORDER_COLOR);
+			border.alpha = 90;
+			rgb_color high = owner->HighColor();
+			owner->SetDrawingMode(B_OP_ALPHA);
+			owner->SetHighColor(border);
+			owner->StrokeRoundRect(iconFrame.InsetByCopy(0, iconSize / 6), 2, 2);
+			owner->SetHighColor(high);
+			owner->SetDrawingMode(B_OP_COPY);
+		}
+
+		owner->MovePenTo(frame.left + spacing * 2 + iconSize,
+			frame.top + BaselineOffset());
+		owner->DrawString(Text());
+
+		owner->SetLowColor(lowColor);
 	}
 
 private:
 			BString				fLanguage;
+			BBitmap*			fIcon;
 };
 
 
@@ -306,7 +374,8 @@ BootPromptWindow::MessageReceived(BMessage* message)
 void
 BootPromptWindow::_ApplyLocaleToSession()
 {
-	// Installer picks these up from /run/vos/setup.conf as its defaults.
+	// Not /run/vos/setup.conf: vos-install-helper truncates that file. The
+	// keymap is already in the live session settings.
 	BString language;
 	if (LanguageItem* item = static_cast<LanguageItem*>(
 			fLanguagesListView->ItemAt(
@@ -314,21 +383,15 @@ BootPromptWindow::_ApplyLocaleToSession()
 		language = item->Language();
 	}
 
-	BString keymap;
-	if (BMenuItem* km = fKeymapsMenuField->Menu()->FindMarked())
-		keymap = km->Label();
+	if (language.IsEmpty())
+		return;
 
-	FILE* f = fopen("/run/vos/setup.conf", "w");
-	if (f != NULL) {
-		if (language.Length() > 0)
-			fprintf(f, "language=%s\n", language.String());
-		if (keymap.Length() > 0)
-			fprintf(f, "keymap=%s\n",   keymap.String());
-		fclose(f);
-	}
+	FILE* f = fopen(kFirstBootHandoffPath, "w");
+	if (f == NULL)
+		return;
+	fprintf(f, "language=%s\n", language.String());
+	fclose(f);
 }
-
-
 
 
 bool
@@ -471,10 +534,10 @@ BootPromptWindow::_UpdateKeymapsMenu()
 	// BMenu can't sort itself; drain and re-add sorted.
 	while ((item = menu->ItemAt(0)) != NULL) {
 		BMessage* message = item->Message();
-		entry_ref ref;
-		message->FindRef("ref", &ref);
-		item-> SetLabel(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-		"KeymapNames", NULL));
+		BString name;
+		message->FindString("name", &name);
+		item->SetLabel(B_TRANSLATE_NOCOLLECT_ALL(name.String(),
+			"KeymapNames", NULL));
 		itemsList.AddItem(item);
 		menu->RemoveItem((int32)0);
 	}
@@ -493,49 +556,67 @@ BootPromptWindow::_PopulateKeymaps()
 		node.ReadAttrString("keymap:name", &currentName);
 	}
 
-	BPath path;
-	if (find_directory(B_SYSTEM_DATA_DIRECTORY, &path) != B_OK
-		|| path.Append("Keymaps") != B_OK) {
-		return;
-	}
-
 	BString usInternational("US-International");
 
-	BDirectory directory;
-	if (directory.SetTo(path.Path()) == B_OK) {
-		entry_ref ref;
-		BList itemsList;
-		while (directory.GetNextRef(&ref) == B_OK) {
-			BMessage* message = new BMessage(MSG_KEYMAP_SELECTED);
-			message->AddRef("ref", &ref);
-			BMenuItem* item =
-				new BMenuItem(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-				"KeymapNames", NULL), message);
-			itemsList.AddItem(item);
-			if (currentName == ref.name)
-				item->SetMarked(true);
+	BList itemsList;
+	int32 count = xkb_layout_table_count();
+	for (int32 i = 0; i < count; i++) {
+		const char* name = xkb_layout_table_name_at(i);
+		if (name == NULL)
+			continue;
 
-			if (usInternational == ref.name)
-				fDefaultKeymapItem = item;
-		}
-		itemsList.SortItems(compare_void_menu_items);
-		fKeymapsMenuField->Menu()->AddList(&itemsList, 0);
+		BMessage* message = new BMessage(MSG_KEYMAP_SELECTED);
+		message->AddString("name", name);
+		BMenuItem* item =
+			new BMenuItem(B_TRANSLATE_NOCOLLECT_ALL(name, "KeymapNames",
+				NULL), message);
+		itemsList.AddItem(item);
+		if (currentName == name)
+			item->SetMarked(true);
+
+		if (usInternational == name)
+			fDefaultKeymapItem = item;
 	}
+	itemsList.SortItems(compare_void_menu_items);
+	fKeymapsMenuField->Menu()->AddList(&itemsList, 0);
 }
 
 
 void
 BootPromptWindow::_ActivateKeymap(const BMessage* message) const
 {
-	entry_ref ref;
-	if (message == NULL || message->FindRef("ref", &ref) != B_OK)
+	BString name;
+	if (message == NULL || message->FindString("name", &name) != B_OK)
 		return;
 
+	const char* layout;
+	const char* variant;
+	look_up_xkb_layout(name.String(), layout, variant);
+
+	// Preserve the active Ctrl/Command mapping instead of reverting.
+	BKeymap active;
+	active.SetToCurrent();
+	const char* options = look_up_xkb_modifier_options(active.Map());
+
 	Keymap keymap;
-	if (keymap.Load(ref) != B_OK) {
-		fprintf(stderr, "Failed to load new keymap file (%s).\n", ref.name);
+	if (keymap.PopulateFromXkbNames("evdev", keymap.Model(), layout, variant,
+			options) != B_OK) {
+		fprintf(stderr, "Failed to derive keymap \"%s\".\n", name.String());
 		return;
 	}
+	keymap.SetName(name.String());
+
+	// A canonical "xkb:layout[:variant]" id, not the label above. Our menu
+	// is built from the curated kXkbLayoutTable while the Keymap preflet
+	// lists evdev.lst descriptions, and the two name spaces do not meet
+	// ("US-International" appears nowhere in evdev.lst), so only the id
+	// can identify this layout to the preflet afterwards.
+	BString layoutId("xkb:");
+	layoutId << layout;
+	if (variant != NULL && variant[0] != '\0')
+		layoutId << ':' << variant;
+
+	keymap.SetLayoutName(layoutId.String());
 
 	entry_ref currentRef;
 	if (_GetCurrentKeymapRef(currentRef) != B_OK) {
@@ -544,11 +625,15 @@ BootPromptWindow::_ActivateKeymap(const BMessage* message) const
 	}
 
 	if (keymap.Save(currentRef) != B_OK) {
-		fprintf(stderr, "Failed to save new keymap file (%s).\n", ref.name);
+		fprintf(stderr, "Failed to save new keymap file (%s).\n",
+			currentRef.name);
 		return;
 	}
 
-	keymap.Use();
+	// Machine-wide (allowed to fail quietly; /etc/default is root-owned) and per-user
+	// (janus ferries to real user at login). Written before activation triggers recompile.
+	keymap.WriteSystemXkbLayout();
+	keymap.ApplyXkbLayout();
 }
 
 
@@ -585,9 +670,10 @@ BootPromptWindow::_KeymapItemForLanguage(BLanguage& language) const
 		BMenuItem* item = menu->ItemAt(i);
 		BMessage* message = item->Message();
 
-		entry_ref ref;
-		if (message->FindRef("ref", &ref) == B_OK
-			&& name == ref.name)
+		// The menu carries layout names now, not refs.
+		BString itemName;
+		if (message->FindString("name", &itemName) == B_OK
+			&& name == itemName)
 			return item;
 	}
 

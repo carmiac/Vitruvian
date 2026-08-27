@@ -1,11 +1,13 @@
 /*
  * Copyright 2004-2011 Haiku Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Sandor Vroemisse
  *		Jérôme Duval
  *		Axel Dörfler, axeld@pinc-software.de.
+ *		Dario Casalinuovo
  */
 
 
@@ -16,6 +18,7 @@
 #include <string.h>
 
 #include <ByteOrder.h>
+#include <Directory.h>
 #include <File.h>
 #include <FindDirectory.h>
 #include <Path.h>
@@ -67,6 +70,9 @@ Keymap::Keymap()
 	:
 	fModificationMessage(NULL)
 {
+	fName[0] = '\0';
+	fLayoutName[0] = '\0';
+	fModel[0] = '\0';
 }
 
 
@@ -90,6 +96,35 @@ void
 Keymap::SetName(const char* name)
 {
 	strlcpy(fName, name, sizeof(fName));
+}
+
+
+void
+Keymap::SetLayoutName(const char* name)
+{
+	strlcpy(fLayoutName, name, sizeof(fLayoutName));
+}
+
+
+const char*
+Keymap::LayoutName() const
+{
+	// An edited map keeps the layout it was edited from.
+	return fLayoutName[0] != '\0' ? fLayoutName : fName;
+}
+
+
+void
+Keymap::SetModel(const char* model)
+{
+	strlcpy(fModel, model != NULL ? model : "", sizeof(fModel));
+}
+
+
+const char*
+Keymap::Model() const
+{
+	return fModel[0] != '\0' ? fModel : "pc105";
 }
 
 
@@ -142,6 +177,15 @@ Keymap::Load(const entry_ref& ref)
 	else
 		strlcpy(fName, ref.name, sizeof(fName));
 
+	// Stored separately: the display name does not survive an edit, the
+	// layout identity must.
+	bytesRead = file.ReadAttr("keymap:layout", B_STRING_TYPE, 0, fLayoutName,
+		sizeof(fLayoutName));
+	if (bytesRead > 0)
+		fLayoutName[bytesRead] = '\0';
+	else
+		strlcpy(fLayoutName, fName, sizeof(fLayoutName));
+
 	return B_OK;
 }
 
@@ -188,6 +232,9 @@ Keymap::Save(const entry_ref& ref)
 		const BString name(fName);
 		file.WriteAttrString("keymap:name", &name);
 			// Failing would be non-fatal
+
+		const BString layoutName(LayoutName());
+		file.WriteAttrString("keymap:layout", &layoutName);
 	}
 
 	return status;
@@ -352,6 +399,15 @@ Keymap::RestoreSystemDefault()
 	BEntry entry(path.Path());
 	entry.Remove();
 
+	// Drop the layout identity with its file, or the write below puts
+	// back what was just discarded.
+	fName[0] = '\0';
+	fLayoutName[0] = '\0';
+
+	// Write before activating, so the caller needs no second activation;
+	// each one costs input_server a full xkb recompile.
+	_WriteXkbLayout();
+
 	return Use();
 }
 
@@ -363,7 +419,121 @@ Keymap::Use()
 	status_t result = _restore_key_map_();
 	if (result == B_OK)
 		set_keyboard_locks(modifiers());
+	// Use() also runs on plain UI refreshes, so it must not write the layout
+	// files; ApplyXkbLayout() does that.
 	return result;
+}
+
+
+void
+Keymap::WriteSystemXkbLayout() const
+{
+	_WriteSystemXkbLayout();
+}
+
+
+void
+Keymap::WriteXkbLayout() const
+{
+	_WriteXkbLayout();
+}
+
+
+void
+Keymap::ApplyXkbLayout(bool systemWide)
+{
+	if (systemWide)
+		_WriteSystemXkbLayout();
+	else
+		_WriteXkbLayout();
+
+	// Re-activate, or the next rebuild reads the previous layout.
+	Use();
+}
+
+
+// Writes input/layout, the keymap name on one line. Read before the
+// xkb_layout cache.
+void
+Keymap::_WriteLayoutName() const
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+		return;
+	path.Append("input");
+	if (create_directory(path.Path(), 0755) != B_OK)
+		return;
+	path.Append("layout");
+
+	BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() != B_OK)
+		return;
+
+	char buffer[B_FILE_NAME_LENGTH + 1];
+	int length = snprintf(buffer, sizeof(buffer), "%s\n", LayoutName());
+	if (length > 0)
+		file.Write(buffer, length);
+}
+
+
+// Regenerated cache, for an installation that has not written input/layout yet.
+void
+Keymap::_WriteXkbLayout() const
+{
+	_WriteLayoutName();
+
+	const char* layout;
+	const char* variant;
+	look_up_xkb_layout(LayoutName(), layout, variant);
+
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+		return;
+	path.Append("input");
+	if (create_directory(path.Path(), 0755) != B_OK)
+		return;
+	path.Append("xkb_layout");
+
+	BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() != B_OK)
+		return;
+
+	char buffer[512];
+	int length = snprintf(buffer, sizeof(buffer),
+		"rules=evdev\n"
+		"model=%s\n"
+		"layout=%s\n"
+		"variant=%s\n"
+		"options=%s\n",
+		Model(), layout, variant, look_up_xkb_modifier_options(Map()));
+	if (length > 0)
+		file.Write(buffer, length);
+}
+
+
+// localectl/console-setup format. Only FirstBootPrompt may write it;
+// later callers lack permission and fail silently.
+void
+Keymap::_WriteSystemXkbLayout() const
+{
+	const char* layout;
+	const char* variant;
+	look_up_xkb_layout(LayoutName(), layout, variant);
+
+	BFile file("/etc/default/keyboard",
+		B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() != B_OK)
+		return;
+
+	char buffer[512];
+	int length = snprintf(buffer, sizeof(buffer),
+		"XKBMODEL=\"pc105\"\n"
+		"XKBLAYOUT=\"%s\"\n"
+		"XKBVARIANT=\"%s\"\n"
+		"XKBOPTIONS=\"%s\"\n",
+		layout, variant, look_up_xkb_modifier_options(Map()));
+	if (length > 0)
+		file.Write(buffer, length);
 }
 
 
@@ -405,6 +575,8 @@ Keymap::operator=(const Keymap& other)
 
 	memcpy(&fKeys, &other.fKeys, sizeof(key_map));
 	strlcpy(fName, other.fName, sizeof(fName));
+	strlcpy(fLayoutName, other.fLayoutName, sizeof(fLayoutName));
+	strlcpy(fModel, other.fModel, sizeof(fModel));
 
 	fTarget = other.fTarget;
 

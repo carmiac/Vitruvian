@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2014 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -8,6 +9,7 @@
  *		Jérôme Duval
  *		John Scipione, jscipione@gmai.com
  *		Sandor Vroemisse
+ *		Dario Casalinuovo
  */
 #ifndef KEYMAP_WINDOW_H
 #define KEYMAP_WINDOW_H
@@ -15,6 +17,7 @@
 
 #include <FilePanel.h>
 #include <ListView.h>
+#include <OutlineListView.h>
 #include <String.h>
 #include <Window.h>
 
@@ -40,12 +43,16 @@ public:
 protected:
 			BMenuBar*			_CreateMenu();
 			BView*				_CreateMapLists();
-			void				_AddKeyboardLayouts(BMenu* menu);
-			void				_AddKeyboardLayoutMenu(BMenu* menu,
-									BDirectory directory);
 			status_t			_SetKeyboardLayout(const char* path);
-			void				_MarkKeyboardLayoutItem(const char* path,
-									BMenu* menu);
+			status_t			_FindKeyboardLayoutPath(const char* name,
+									BPath& _path);
+			void				_AutoPickKeyboardTemplate();
+
+			void				_AddModelMenu(BMenu* menu);
+			void				_MarkCurrentModel();
+
+			void				_XkbLayoutSelected(const char* id,
+									const char* label);
 
 			void				_UpdateSwitchShortcutButton();
 			void				_UpdateButtons();
@@ -64,20 +71,20 @@ protected:
 
 			status_t			_GetCurrentKeymap(entry_ref& ref);
 			BString				_GetActiveKeymapName();
-			bool				_SelectCurrentMap(BListView* list);
+			BString				_GetActiveLayoutId();
+			bool				_SelectCurrentSystemMap();
 			void				_SelectCurrentMap();
 
 			status_t			_GetSettings(BFile& file, int mode) const;
 			status_t			_LoadSettings(BRect& frame);
 			status_t			_SaveSettings();
-			BPath				_GetMarkedKeyboardLayoutPath(BMenu* menu);
 
 private:
-			BListView*			fSystemListView;
+			BOutlineListView*	fSystemListView;
 			BListView*			fUserListView;
 			BButton*			fDefaultsButton;
 			BButton*			fRevertButton;
-			BMenu*				fLayoutMenu;
+			BMenu*				fModelMenu;
 			BMenu*				fFontMenu;
 			KeyboardLayoutView*	fKeyboardLayoutView;
 			BTextControl*		fTextControl;
@@ -93,8 +100,15 @@ private:
 			Keymap				fAppliedMap;
 			BString				fCurrentMapName;
 
+			// Set only by an explicit shape pick from the model menu, so
+			// the geometry auto-pick never fights a manual choice.
+			bool				fUserPickedLayout;
+			BString				fKeyboardLayoutPath;
+
+#ifndef __VOS__
 			BFilePanel*			fOpenPanel;
 			BFilePanel*			fSavePanel;
+#endif
 };
 
 #endif	// KEYMAP_WINDOW_H

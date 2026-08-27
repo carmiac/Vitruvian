@@ -85,8 +85,8 @@ ImageIncludeDir("data/system/data/joysticks" "/system/data/")
 ImageIncludeDir("data/system/data/network" "/system/data/")
 ImageIncludeDir("data/system/data/licenses" "/system/data/")
 ImageIncludeDir("data/system/data/fonts" "/system/data/")
+ImageIncludeDir("data/system/data/KeyboardLayouts" "/system/data/")
 
-# Default desktop wallpaper (V\OS logo, transparent PNG)
 install(FILES "data/artwork/V_OS logo.png" DESTINATION "/system/data/artwork")
 
 # Profile, inputrc, and profile.d scripts for Terminal
