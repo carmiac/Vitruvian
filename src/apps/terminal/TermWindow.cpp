@@ -3,6 +3,7 @@
  * Copyright (c) 2004 Daniel Furrer <assimil8or@users.sourceforge.net>
  * Copyright (c) 2003-2004 Kian Duffy <myob@users.sourceforge.net>
  * Copyright (C) 1998,99 Kazuho Okui and Takashi Murai.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  *
  * Distributed under the terms of the MIT license.
  *
@@ -12,6 +13,7 @@
  *		John Scipione, jscipione@gmail.com
  *		Simon South, simon@simonsouth.net
  *		Siarzhuk Zharski, zharik@gmx.li
+ *		Dario Casalinuovo
  */
 
 
@@ -190,6 +192,8 @@ TermWindow::TermWindow(const Arguments& args)
 	fTabView(NULL),
 	fMenuBar(NULL),
 	fSwitchTerminalsMenuItem(NULL),
+	fCloseWindowMenuItem(NULL),
+	fQuitMenuItem(NULL),
 	fEncodingMenu(NULL),
 	fPrintSettings(NULL),
 	fPrefWindow(NULL),
@@ -312,10 +316,8 @@ TermWindow::_InitWindow()
 		AddShortcut('1' + i, B_COMMAND_KEY, message);
 	}
 
-	AddShortcut(B_LEFT_ARROW, B_COMMAND_KEY, new BMessage(MSG_SWITCH_TAB_LEFT));
-	AddShortcut(B_RIGHT_ARROW, B_COMMAND_KEY, new BMessage(MSG_SWITCH_TAB_RIGHT));
-	AddShortcut(B_LEFT_ARROW, B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_MOVE_TAB_LEFT));
-	AddShortcut(B_RIGHT_ARROW, B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_MOVE_TAB_RIGHT));
+	// The arrow shortcuts move with the Command key; _UpdateShortcuts()
+	// assigns them, and _SetupMenu() has already called it once.
 
 	BRect textFrame = Bounds();
 	textFrame.top = fMenuBar->Bounds().bottom + 1.0;
@@ -508,32 +510,32 @@ TermWindow::_SetupMenu()
 			.AddItem(B_TRANSLATE_COMMENT("Switch Terminals", "'Terminals' being this application's "
 				"name"), MENU_SWITCH_TERM, B_TAB)
 				.GetItem(fSwitchTerminalsMenuItem)
-			.AddItem(newTerminal, MENU_NEW_TERM, 'N')
-			.AddItem(B_TRANSLATE("New tab"), kNewTab, 'T')
+			.AddItem(newTerminal, MENU_NEW_TERM)
+			.AddItem(B_TRANSLATE("New tab"), kNewTab)
 			.AddSeparator()
 			.AddItem(B_TRANSLATE("Page setup" B_UTF8_ELLIPSIS), MENU_PAGE_SETUP)
-			.AddItem(B_TRANSLATE("Print"), MENU_PRINT, 'P')
+			.AddItem(B_TRANSLATE("Print"), MENU_PRINT)
 			.AddSeparator()
-			.AddItem(B_TRANSLATE("Close window"), B_QUIT_REQUESTED, 'W',
-				B_SHIFT_KEY)
-			.AddItem(B_TRANSLATE("Close active tab"), kCloseView, 'W')
-			.AddItem(B_TRANSLATE("Quit"), B_QUIT_REQUESTED, 'Q')
+			.AddItem(B_TRANSLATE("Close window"), B_QUIT_REQUESTED)
+				.GetItem(fCloseWindowMenuItem)
+			.AddItem(B_TRANSLATE("Close active tab"), kCloseView)
+			.AddItem(B_TRANSLATE("Quit"), B_QUIT_REQUESTED)
+				.GetItem(fQuitMenuItem)
 		.End()
 
 		// Edit
 		.AddMenu(B_TRANSLATE("Edit"))
-			.AddItem(B_TRANSLATE("Copy"), B_COPY, 'C')
-			.AddItem(B_TRANSLATE("Paste"), B_PASTE, 'V')
+			.AddItem(B_TRANSLATE("Copy"), B_COPY)
+			.AddItem(B_TRANSLATE("Paste"), B_PASTE)
 			.AddSeparator()
-			.AddItem(B_TRANSLATE("Select all"), B_SELECT_ALL, 'A')
-			.AddItem(B_TRANSLATE("Clear all"), MENU_CLEAR_ALL, 'L')
+			.AddItem(B_TRANSLATE("Select all"), B_SELECT_ALL)
+			.AddItem(B_TRANSLATE("Clear all"), MENU_CLEAR_ALL)
 			.AddSeparator()
-			.AddItem(B_TRANSLATE("Find" B_UTF8_ELLIPSIS), MENU_FIND_STRING, 'F')
-			.AddItem(B_TRANSLATE("Find previous"), MENU_FIND_PREVIOUS, 'G',
-					B_SHIFT_KEY)
+			.AddItem(B_TRANSLATE("Find" B_UTF8_ELLIPSIS), MENU_FIND_STRING)
+			.AddItem(B_TRANSLATE("Find previous"), MENU_FIND_PREVIOUS)
 				.GetItem(fFindPreviousMenuItem)
 				.SetEnabled(false)
-			.AddItem(B_TRANSLATE("Find next"), MENU_FIND_NEXT, 'G')
+			.AddItem(B_TRANSLATE("Find next"), MENU_FIND_NEXT)
 				.GetItem(fFindNextMenuItem)
 				.SetEnabled(false)
 		.End()
@@ -553,6 +555,8 @@ TermWindow::_SetupMenu()
 		.End();
 
 	AddChild(fMenuBar);
+
+	_UpdateShortcuts();
 
 	_UpdateSwitchTerminalsMenuItem();
 
@@ -2125,6 +2129,106 @@ TermWindow::_MoveWindowInScreen(BWindow* window)
 }
 
 
+// Menu shortcuts that have to move when Command moves. Keys left out are
+// not control characters, so bare Command reaches them in either
+// arrangement.
+static const struct {
+	uint32	command;
+	char	key;
+} kLetterShortcuts[] = {
+	{ MENU_NEW_TERM,	'N' },
+	{ kNewTab,			'T' },
+	{ MENU_PRINT,		'P' },
+	{ kCloseView,		'W' },
+	{ B_COPY,			'C' },
+	{ B_PASTE,			'V' },
+	{ B_SELECT_ALL,		'A' },
+	{ MENU_CLEAR_ALL,	'L' },
+	{ MENU_FIND_STRING,	'F' },
+	{ MENU_FIND_NEXT,	'G' },
+};
+
+// BWindow::InitData() installs Command+X/C/V/A/W on every window. In ctrl
+// mode they land on control characters a terminal needs to send (Ctrl+C,
+// Ctrl+A), so they're withdrawn here rather than put back for either mode.
+static const char kInheritedShortcutKeys[] = { 'X', 'C', 'V', 'A', 'W' };
+
+
+// Assigns every shortcut whose placement depends on where Command sits.
+// Called from _SetupMenu() and again on every B_KEY_MAP_LOADED. In ctrl
+// mode, bare Command+letter would swallow a control character the shell
+// needs, so letter shortcuts move to Command+Shift; "Close window" drops
+// its shortcut and "Find previous" moves to H to avoid collisions.
+//
+// This whole dance is specific to Terminal: it is the only app where a
+// control character is data for a child process rather than a command,
+// so it is the only one that has to react to B_KEY_MAP_LOADED and move
+// its shortcuts out of the way. Not a pattern to copy elsewhere, and it
+// only exists because our ctrl-mode default puts Command and Control on
+// the same physical key; none of it applies upstream.
+void
+TermWindow::_UpdateShortcuts()
+{
+	if (fMenuBar == NULL)
+		return;
+
+	const bool ctrlMode = command_is_control_key(fKeymap);
+	const uint32 letterModifier = ctrlMode ? B_SHIFT_KEY : 0;
+
+	for (size_t i = 0; i < B_COUNT_OF(kInheritedShortcutKeys); i++)
+		RemoveShortcut(kInheritedShortcutKeys[i], B_COMMAND_KEY);
+
+	for (size_t i = 0; i < B_COUNT_OF(kLetterShortcuts); i++) {
+		BMenuItem* item = fMenuBar->FindItem(kLetterShortcuts[i].command);
+		if (item != NULL)
+			item->SetShortcut(kLetterShortcuts[i].key, letterModifier);
+	}
+
+	// "Close window" and "Quit" both carry B_QUIT_REQUESTED, so FindItem()
+	// cannot tell them apart, hence the stored pointers.
+	if (fQuitMenuItem != NULL)
+		fQuitMenuItem->SetShortcut('Q', letterModifier);
+	if (fCloseWindowMenuItem != NULL) {
+		fCloseWindowMenuItem->SetShortcut(ctrlMode ? 0 : 'W',
+			ctrlMode ? 0 : B_SHIFT_KEY);
+	}
+	if (fFindPreviousMenuItem != NULL)
+		fFindPreviousMenuItem->SetShortcut(ctrlMode ? 'H' : 'G', B_SHIFT_KEY);
+
+	// This RemoveShortcut() removes nothing: Command+Q was never added
+	// with that modifier in ctrl mode, so the table already lacks it.
+	// The point is a side effect BWindow does not document as API: on
+	// an unregistered shortcut, RemoveShortcut() still sets the private
+	// fNoQuitShortcut flag, which is what stops BWindow answering
+	// Command+Q ahead of the shortcut table. Without this call, Quit
+	// would fire on bare Command+Q even though no menu item shows that
+	// binding. Do not delete this as dead code; it depends on a
+	// BWindow implementation detail, not a published contract.
+	if (ctrlMode)
+		RemoveShortcut('Q', B_COMMAND_KEY);
+
+	// Command+arrow is Ctrl+arrow in ctrl mode, which readline/editors use
+	// for word-wise movement; tab switching yields it and takes Shift,
+	// reordering moves to Option.
+	const uint32 switchTab = ctrlMode ? B_COMMAND_KEY | B_SHIFT_KEY
+		: B_COMMAND_KEY;
+	const uint32 moveTab = ctrlMode ? B_COMMAND_KEY | B_OPTION_KEY
+		: B_COMMAND_KEY | B_SHIFT_KEY;
+
+	RemoveShortcut(B_LEFT_ARROW, B_COMMAND_KEY);
+	RemoveShortcut(B_RIGHT_ARROW, B_COMMAND_KEY);
+	RemoveShortcut(B_LEFT_ARROW, B_COMMAND_KEY | B_SHIFT_KEY);
+	RemoveShortcut(B_RIGHT_ARROW, B_COMMAND_KEY | B_SHIFT_KEY);
+	RemoveShortcut(B_LEFT_ARROW, B_COMMAND_KEY | B_OPTION_KEY);
+	RemoveShortcut(B_RIGHT_ARROW, B_COMMAND_KEY | B_OPTION_KEY);
+
+	AddShortcut(B_LEFT_ARROW, switchTab, new BMessage(MSG_SWITCH_TAB_LEFT));
+	AddShortcut(B_RIGHT_ARROW, switchTab, new BMessage(MSG_SWITCH_TAB_RIGHT));
+	AddShortcut(B_LEFT_ARROW, moveTab, new BMessage(MSG_MOVE_TAB_LEFT));
+	AddShortcut(B_RIGHT_ARROW, moveTab, new BMessage(MSG_MOVE_TAB_RIGHT));
+}
+
+
 void
 TermWindow::_UpdateKeymap()
 {
@@ -2137,4 +2241,6 @@ TermWindow::_UpdateKeymap()
 		TermView* view = _TermViewAt(i);
 		view->SetKeymap(fKeymap, fKeymapChars);
 	}
+
+	_UpdateShortcuts();
 }

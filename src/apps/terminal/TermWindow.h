@@ -1,6 +1,7 @@
 /*
  * Copyright 2001-2025 Haiku, Inc. All rights reserved
  * Copyright (c) 2003-4 Kian Duffy <myob@users.sourceforge.net>
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Parts Copyright (C) 1998,99 Kazuho Okui and Takashi Murai.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -189,6 +190,7 @@ private:
 
 			void				_MoveWindowInScreen(BWindow* window);
 
+			void				_UpdateShortcuts();
 			void				_UpdateKeymap();
 
 private:
@@ -205,6 +207,8 @@ private:
 
 			BMenuBar*			fMenuBar;
 			BMenuItem*			fSwitchTerminalsMenuItem;
+			BMenuItem*			fCloseWindowMenuItem;
+			BMenuItem*			fQuitMenuItem;
 			BMenu*				fEncodingMenu;
 			BMenu*				fFontSizeMenu;
 
