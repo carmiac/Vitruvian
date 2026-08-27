@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1998-2007 Matthijs Hollemans
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * All rights reserved. Distributed under the terms of the MIT License.
  */
 #include "GrepWindow.h"
@@ -973,15 +974,6 @@ GrepWindow::_OnNodeMonitorEvent(BMessage* message)
 		{
 			TRACE_NM("B_ENTRY_MOVED\n");
 
-			BString path;
-			if (message->FindString("path", &path) != B_OK) {
-				#ifdef TRACE_NODE_MONITORING
-					printf("incompatible message:\n");
-					message->PrintToStream();
-				#endif
-				break;
-			}
-
 			bool added;
 			if (message->FindBool("added", &added) != B_OK)
 				added = false;
@@ -989,11 +981,41 @@ GrepWindow::_OnNodeMonitorEvent(BMessage* message)
 			if (message->FindBool("removed", &removed) != B_OK)
 				removed = false;
 
+			// "added" carries only "path"; "removed" carries only
+			// "from path"; a plain move carries both.
+			BString path;
+			bool havePath = message->FindString("path", &path) == B_OK;
+			BString fromPath;
+			bool haveFromPath = message->FindString("from path", &fromPath)
+				== B_OK;
+
+			if (!havePath && !haveFromPath) {
+				#ifdef TRACE_NODE_MONITORING
+					printf("incompatible message:\n");
+					message->PrintToStream();
+				#endif
+				break;
+			}
+
 			if (added) {
-				// new files
+				// a file was moved into the search path; treat it like a
+				// newly created entry
+				if (havePath) {
+					if (fChangesIterator != NULL)
+						fChangesIterator->EntryAdded(path.String());
+				}
 			} else if (removed) {
-				// remove files
-			} else {
+				// a file was moved out of the search path; treat it like a
+				// removed entry
+				if (haveFromPath) {
+					if (fChangesIterator != NULL)
+						fChangesIterator->EntryRemoved(fromPath.String());
+					BEntry entry(fromPath.String());
+					entry_ref ref;
+					if (entry.GetRef(&ref) == B_OK)
+						fSearchResults->RemoveResults(ref, true);
+				}
+			} else if (havePath) {
 				// files changed location, but are still within the search
 				// path!
 				BEntry entry(path.String());

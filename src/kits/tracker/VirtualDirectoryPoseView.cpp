@@ -1,9 +1,11 @@
 /*
  * Copyright 2013 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Ingo Weinhold, ingo_weinhold@gmx.de
+ *		Dario Casalinuovo
  */
 
 
@@ -289,7 +291,9 @@ VirtualDirectoryPoseView::_EntryRemoved(const BMessage* message)
 		|| message->FindRef("virtual:directory", &entryRef) != B_OK) {
 		return true;
 	}
-	entryRef = entry_ref(node_ref(nodeRef.vdevice(), nodeRef.vnode()), entryRef.name);
+	// entryRef is already a complete virtual entry_ref; rebuilding it from
+	// nodeRef (the entry's own node, not its parent's) would corrupt the
+	// parent directory identity.
 
 	// It might be our definition file.
 	if (nodeRef == *TargetModel()->NodeRef())
@@ -392,7 +396,9 @@ VirtualDirectoryPoseView::_EntryMoved(const BMessage* message)
 		|| message->FindRef("virtual:to directory", &toEntryRef) != B_OK) {
 		return true;
 	}
-	toEntryRef = entry_ref(node_ref(fromEntryRef.vdevice(), fromEntryRef.vdirectory()), toEntryRef.name);
+	// toEntryRef already carries its own directory; the virtual model allows
+	// the destination to live under a different vref than the source, so
+	// overwriting it with fromEntryRef's would point at the wrong directory.
 
 	// TODO: That's the lazy approach. Ideally we'd analyze the situation and
 	// forward a B_ENTRY_MOVED, if possible. There are quite a few cases to
