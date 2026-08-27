@@ -399,9 +399,9 @@ BPartition::GetPath(BPath* path) const
 	char indexBuffer[NAME_MAX + 1];
 
 	if (Parent()->IsDevice()) {
-		// Our parent is a device. Haiku path convention: `.../raw` →
+		// Our parent is a device. Haiku path convention: `.../raw` ->
 		// replace `raw` with the partition index. Vitruvian/Linux
-		// convention: `/dev/vdb` → `/dev/vdb1` (or `/dev/nvme0n1p1`
+		// convention: `/dev/vdb` -> `/dev/vdb1` (or `/dev/nvme0n1p1`
 		// when the leaf ends in a digit). Prefer the on-disk partition
 		// number (Name(), read from sysfs) over Index() so gaps in the
 		// GPT numbering are preserved.

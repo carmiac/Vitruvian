@@ -471,7 +471,7 @@ Registrar::_HandleIsShutDownInProgress(BMessage *request)
 /*!	\brief Handle logind PrepareForShutdown(active).
 
 	Two-level shutdown collaboration. Reentrancy guard: if
-	fShutdownProcess is already running, this is the systemctl → logind
+	fShutdownProcess is already running, this is the systemctl -> logind
 	loop reflecting our own top-down shutdown back at us; just release
 	the inhibit fd and return.
 
@@ -489,7 +489,7 @@ Registrar::_HandleLogindPrepareForShutdown(BMessage *request)
 
 	if (fShutdownProcess != NULL) {
 		// Our own shutdown is already in flight (top-down BRoster::Shutdown
-		// → _kern_shutdown → systemctl → PrepareForShutdown loop). Don't
+		// -> _kern_shutdown -> systemctl -> PrepareForShutdown loop). Don't
 		// re-enter. Inhibit will be released when B_REG_SHUTDOWN_FINISHED
 		// fires from ShutdownProcess.
 		return;

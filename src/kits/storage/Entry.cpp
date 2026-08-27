@@ -592,7 +592,7 @@ BEntry::GetNodeRef(node_ref* ref) const
 	if (ref == NULL)
 		return B_BAD_VALUE;
 
-	// TODO(vref→path): when path-backed handles land, restore the full
+	// TODO(vref->path): when path-backed handles land, restore the full
 	// stat + re-open liveness check that was here — path refs can go stale
 	// on any rename, unlike vref (fd-backed, inode kept alive) or fh
 	// (survives rename but not unlink).

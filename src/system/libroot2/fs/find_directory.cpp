@@ -339,10 +339,10 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 				templatePath = "$h/Desktop";
 			break;
 		case B_TRASH_DIRECTORY:
-			// XDG Trash spec. Home volume → $d/Trash/files, where $d is
+			// XDG Trash spec. Home volume -> $d/Trash/files, where $d is
 			// XDG_DATA_HOME. Tracker resolves the same way, and the two must
 			// agree.
-			// FAT (legacy) → RECYCLED/_BEOS_. Other external volumes are
+			// FAT (legacy) -> RECYCLED/_BEOS_. Other external volumes are
 			// routed by FSGetTrashDir via MountInfo to <mount>/.Trash-<uid>/
 			// files (this template stays NULL so callers that ask without
 			// volume context get -ENOENT, matching Haiku).

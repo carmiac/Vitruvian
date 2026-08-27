@@ -245,7 +245,7 @@ status_t
 FBDevHWInterface::CopyBackToFront(const BRect& frame)
 {
 	// Single-buffer: app_server draws directly into the front buffer via
-	// DrawingBuffer() == FrontBuffer(). No back→front copy needed.
+	// DrawingBuffer() == FrontBuffer(). No back->front copy needed.
 	// Composite the software cursor on top of whatever was just drawn.
 	_DrawCursor(IntRect(frame));
 	return B_OK;

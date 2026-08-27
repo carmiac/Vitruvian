@@ -211,7 +211,7 @@ _kern_open_parent_dir(int fd, char* name, size_t length)
 			return ret;
 		}
 
-		// Treat empty path and "/" as the root → leaf name must be "."
+		// Treat empty path and "/" as the root -> leaf name must be "."
 		// (the GNU basename() returns "" instead of "." for these inputs).
 		char* baseName;
 		if (buf[0] == '\0' || strcmp(buf, "/") == 0) {

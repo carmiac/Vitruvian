@@ -300,7 +300,7 @@ BMediaAutomation::Impl::_PlayLoop()
 			fTarget->SetParameterValue(t.id, now, &v, sizeof(v));
 			fTarget->BroadcastChangedParameter(t.id);
 		}
-		// Check if past last point on every track → stop.
+		// Check if past last point on every track -> stop.
 		bool anyPending = false;
 		for (auto& t : fTracks) {
 			if (!t.points.empty() && now < t.points.back().time) {

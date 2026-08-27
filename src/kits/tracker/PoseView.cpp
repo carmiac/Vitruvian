@@ -1682,7 +1682,7 @@ BPoseView::ToggleDisksVolumes()
 		if (TrackerSettings().MountVolumesOntoDesktop()) {
 			RemoveRootPose();
 #ifdef __VOS__
-			// On VOS, AddVolumePoses() → CreateVolumePose() uses vref-backed
+			// On VOS, AddVolumePoses() -> CreateVolumePose() uses vref-backed
 			// BDirectory refs that are unreliable in this context. CreateRootPose()
 			// uses BEntry("/") directly and does the right thing (no override when
 			// ShowDisksIcon=false, so "/" comes back as kVolumeNode = Vitruvian).

@@ -544,7 +544,7 @@ set_thread_priority(thread_id id, int32 priority)
 		// Try SCHED_RR — works if CAP_SYS_NICE or RLIMIT_RTPRIO allows it.
 		// If not, fall back to nice -20 (highest non-RT priority available
 		// without privileges).
-		// 31→1, 120→90
+		// 31->1, 120->90
 		param.sched_priority = 1 + (priority - 31);
 		if (sched_setscheduler(id, SCHED_RR, &param) != 0) {
 			param.sched_priority = 0;

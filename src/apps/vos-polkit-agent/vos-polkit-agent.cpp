@@ -180,7 +180,7 @@ AuthDialog::_Send(bool ok)
 //
 // The agent process is not privileged; the helper is (setuid root) and runs
 // PAM on our behalf. Protocol: line-based text over the helper's stdin/stdout.
-//   → helper writes:   PAM_PROMPT_ECHO_OFF <prompt>
+//   -> helper writes:   PAM_PROMPT_ECHO_OFF <prompt>
 //                      PAM_PROMPT_ECHO_ON  <prompt>
 //                      PAM_ERROR_MSG       <text>
 //                      PAM_TEXT_INFO       <text>

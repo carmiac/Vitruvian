@@ -81,7 +81,7 @@ _kern_get_safemode_option(const char *parameter,
 
 	bool active = false;
 
-	// safemode_defs.h constants → Linux cmdline tokens.
+	// safemode_defs.h constants -> Linux cmdline tokens.
 	if (strcmp(parameter, B_SAFEMODE_DISABLE_IDE_DMA) == 0)
 		active = cmdline_has("libata.dma=0");
 	else if (strcmp(parameter, B_SAFEMODE_DISABLE_ACPI) == 0)

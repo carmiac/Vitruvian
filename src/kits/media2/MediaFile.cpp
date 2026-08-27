@@ -551,7 +551,7 @@ BMediaTrack::Duration() const
 	gint64 dur = 0;
 	if (!gst_element_query_duration(fImpl->fPipeline, GST_FORMAT_TIME, &dur))
 		return 0;
-	return (bigtime_t)(dur / 1000);	// ns → µs
+	return (bigtime_t)(dur / 1000);	// ns -> µs
 }
 
 
@@ -563,7 +563,7 @@ BMediaTrack::CurrentTime() const
 	gint64 pos = 0;
 	if (!gst_element_query_position(fImpl->fPipeline, GST_FORMAT_TIME, &pos))
 		return 0;
-	return (bigtime_t)(pos / 1000);	// ns → µs
+	return (bigtime_t)(pos / 1000);	// ns -> µs
 }
 
 

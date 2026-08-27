@@ -184,7 +184,7 @@ MesaEGLRenderer::_Init()
 		return B_ERROR;
 	}
 
-	// Try GL contexts highest→lowest version
+	// Try GL contexts highest->lowest version
 	static const struct { int maj, min; } kVersions[] = {
 		{4, 6}, {4, 5}, {4, 0}, {3, 3}, {3, 1}, {2, 0}, {0, 0}
 	};

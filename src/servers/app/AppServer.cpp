@@ -271,7 +271,7 @@ AppServer::_FindDesktop(uid_t userID, const char* targetScreen)
 
 
 // Async-signal-safe: post B_QUIT_REQUESTED so the looper unwinds the
-// C++ teardown (Desktop → HWInterface dtor → drmDropMaster).
+// C++ teardown (Desktop -> HWInterface dtor -> drmDropMaster).
 static void
 signal_quit(int /*signo*/)
 {
