@@ -228,11 +228,18 @@ fill_partition_info(const char* devPath, const char* sysPath,
 	if (mounted) {
 		data->flags |= B_PARTITION_FILE_SYSTEM;
 		data->flags |= B_PARTITION_MOUNTED;
-		const char* bp = strrchr(mountPoint, '/');
-		if (bp && bp[1] != '\0')
-			data->content_name = strdup(bp + 1);
-		else
-			data->content_name = strdup(mountPoint);
+
+		const char* sysname = strrchr(devPath, '/');
+		sysname = sysname ? sysname + 1 : devPath;
+
+		char label[256] = {0};
+		if (BKernelPrivate::get_udev_fs_label(sysname, label, sizeof(label))
+			&& label[0] != '\0') {
+			data->content_name = strdup(label);
+		} else if (BKernelPrivate::get_volume_label(devPath, label,
+				sizeof(label)) && label[0] != '\0') {
+			data->content_name = strdup(label);
+		}
 
 		if (fsType[0])
 			data->content_type = strdup(fsType);

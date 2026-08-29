@@ -1809,8 +1809,17 @@ BPoseView::CreateVolumePose(BVolume* volume)
 	node_ref itemNode;
 	root.GetNodeRef(&itemNode);
 
+	// dirNode is the directory the volume is mounted in, not the volume
+	// root. Upstream builds it from ref.device/directory; vref-backed
+	// node_refs cannot be, so walk to the parent.
+	BEntry volumeEntry;
+	BDirectory parent;
 	node_ref dirNode;
-	root.GetNodeRef(&dirNode);
+	if (root.GetEntry(&volumeEntry) != B_OK
+		|| volumeEntry.GetParent(&parent) != B_OK
+		|| parent.GetNodeRef(&dirNode) != B_OK) {
+		return;
+	}
 
 	BPose* pose = EntryCreated(&dirNode, &itemNode, ref.name, 0);
 	if (pose != NULL && !TargetModel()->IsRoot()) {

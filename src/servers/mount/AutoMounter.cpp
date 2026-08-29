@@ -12,7 +12,9 @@
 
 #include <new>
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -56,6 +58,26 @@ static const char* kMountServerSettings = "mount_server";
 static const char* kMountFlagsKeyExtension = " mount flags";
 
 static const char* kInitialMountEvent = "initial_volumes_mounted";
+
+
+static uid_t
+session_owner()
+{
+	static uid_t sOwner = (uid_t)-2;
+	if (sOwner != (uid_t)-2)
+		return sOwner;
+
+	sOwner = (uid_t)-1;
+	const char* sudoUid = getenv("SUDO_UID");
+	if (sudoUid != NULL && isdigit((unsigned char)*sudoUid)) {
+		char* end;
+		unsigned long value = strtoul(sudoUid, &end, 10);
+		if (*end == '\0' && value != (unsigned long)(uid_t)-1)
+			sOwner = (uid_t)value;
+	}
+
+	return sOwner;
+}
 
 
 class MountVisitor : public BDiskDeviceVisitor {
@@ -196,6 +218,13 @@ MountVisitor::Visit(BPartition* partition, int32 level)
 			return false;
 	}
 
+	// Before _SuggestMountFlags() below, which can put up an alert.
+	uid_t owner = session_owner();
+	if (owner == (uid_t)-1) {
+		// Would be root-owned; Tracker's Mount menu still works.
+		return false;
+	}
+
 	uint32 mountFlags;
 	if (!fInitialRescan) {
 		// Ask the user about mount flags if this is not the
@@ -211,7 +240,7 @@ MountVisitor::Visit(BPartition* partition, int32 level)
 		}
 	}
 
-	if (partition->Mount(NULL, mountFlags) != B_OK) {
+	if (partition->Mount(NULL, mountFlags, NULL, owner) != B_OK) {
 		// TODO: Error to syslog
 	}
 	return false;
@@ -257,10 +286,14 @@ MountArchivedVisitor::~MountArchivedVisitor()
 	if ((fBestScore & ~requiredMatches) == 0)
 		return;
 
+	uid_t owner = session_owner();
+	if (owner == (uid_t)-1)
+		return;
+
 	uint32 mountFlags = fArchived.GetUInt32("mountFlags", 0);
 	BPartition* partition = fDevices.PartitionWithID(fBestID);
 	if (partition != NULL)
-		partition->Mount(NULL, mountFlags);
+		partition->Mount(NULL, mountFlags, NULL, owner);
 }
 
 

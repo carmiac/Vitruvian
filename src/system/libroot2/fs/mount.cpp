@@ -78,11 +78,10 @@ make_idmap_userns(uid_t owner, gid_t ownerGroup)
 		return -e;
 	}
 
-	// uid_map: <id_in_ns=owner> <id_on_parent=0> <count=1>
 	char path[64];
 	char buf[128];
 	snprintf(path, sizeof(path), "/proc/%d/uid_map", pid);
-	snprintf(buf, sizeof(buf), "%u %u 1\n", (unsigned)owner, 0u);
+	snprintf(buf, sizeof(buf), "%u %u 1\n", 0u, (unsigned)owner);
 	int fd = open(path, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
 		int e = errno;
@@ -109,7 +108,7 @@ make_idmap_userns(uid_t owner, gid_t ownerGroup)
 	}
 
 	snprintf(path, sizeof(path), "/proc/%d/gid_map", pid);
-	snprintf(buf, sizeof(buf), "%u %u 1\n", (unsigned)ownerGroup, 0u);
+	snprintf(buf, sizeof(buf), "%u %u 1\n", 0u, (unsigned)ownerGroup);
 	fd = open(path, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
 		int e = errno;
