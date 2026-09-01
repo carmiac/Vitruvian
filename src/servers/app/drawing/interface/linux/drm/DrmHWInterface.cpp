@@ -78,13 +78,15 @@ DrmHWInterface::DrmHWInterface()
 	fAtomicSupported(false),
 	fPrimaryPlaneId(0),
 	fCursorPlaneId(0),
+	fCursorUsesAtomic(false),
 	fModeBlobId(0),
 	fPlaneProps{},
 	fCursorPlaneProps{},
 	fCrtcProps{},
 	fConnProps{},
 	fVRRSupported(false),
-	fVRREnabled(false)
+	fVRREnabled(false),
+	fPanelOrientation(PANEL_ORIENTATION_NORMAL)
 {
 	pthread_mutex_init(&fDirtyMutex, NULL);
 
@@ -162,6 +164,10 @@ DrmHWInterface::_OnSessionEnable()
 		release_sem(fSessionSem);
 
 		_RestoreDisplay();
+
+		// Re-arm the plane _OnSessionDisable() cleared, from last known state.
+		if (fHardwareCursorEnabled && fCursor.IsSet())
+			SetCursor(fCursor);
 
 		LockExclusiveAccess();
 		Invalidate(BRect(0, 0, fDisplayMode.virtual_width - 1,
@@ -282,6 +288,8 @@ DrmHWInterface::_OnSessionEnable()
 		}
 	}
 
+	_DiscoverPanelOrientation();
+
 	struct modeset_dev* initDev = get_dev();
 	fDisplayMode.virtual_width = initDev->width;
 	fDisplayMode.virtual_height = initDev->height;
@@ -340,6 +348,10 @@ DrmHWInterface::_OnSessionDisable()
 	fPreviousDirty.MakeEmpty();
 	fNeedsFlip = false;
 	pthread_mutex_unlock(&fDirtyMutex);
+
+	// Clear while still DRM master, or the next VT/session owner scans
+	// out our stale sprite.
+	_DisableHardwareCursor();
 
 	if (fFd >= 0)
 		drmDropMaster(fFd);
@@ -562,6 +574,10 @@ DrmHWInterface::_EventThreadMain()
 DrmHWInterface::~DrmHWInterface()
 {
 	CALLED();
+
+	// Clear while we can still be DRM master, or a leftover armed cursor
+	// keeps scanning out after we're gone (janus-shared fd case).
+	_DisableHardwareCursor();
 
 	// Janus-shared fd is a dup() of janus's open — dropping master here
 	// would revoke janus's too, and the non-root successor can't reacquire.
@@ -872,7 +888,51 @@ status_t
 DrmHWInterface::GetDeviceInfo(accelerant_device_info* info)
 {
 	CALLED();
-	return B_UNSUPPORTED;
+
+	if (info == NULL)
+		return B_BAD_VALUE;
+	if (fFd < 0)
+		return B_NO_INIT;
+
+	memset(info, 0, sizeof(*info));
+	info->version = B_ACCELERANT_VERSION;
+
+	// The driver name is the closest thing DRM has to a chipset: there is
+	// no accelerant here to ask.
+	drmVersionPtr version = drmGetVersion(fFd);
+	if (version != NULL) {
+		if (version->name != NULL)
+			strlcpy(info->chipset, version->name, sizeof(info->chipset));
+		if (version->desc != NULL)
+			strlcpy(info->name, version->desc, sizeof(info->name));
+		drmFreeVersion(version);
+	}
+
+	// A driver description is generic ("AMD GPU"), so prefer the product
+	// name hwdb resolves for the card's PCI parent when there is one.
+	struct stat st;
+	if (fUdev != NULL && fstat(fFd, &st) == 0) {
+		struct udev_device* dev
+			= udev_device_new_from_devnum(fUdev, 'c', st.st_rdev);
+		if (dev != NULL) {
+			struct udev_device* pci
+				= udev_device_get_parent_with_subsystem_devtype(dev, "pci",
+					NULL);
+			const char* model = pci != NULL
+				? udev_device_get_property_value(pci,
+					"ID_MODEL_FROM_DATABASE")
+				: NULL;
+			if (model != NULL && model[0] != '\0')
+				strlcpy(info->name, model, sizeof(info->name));
+			// pci is owned by dev; unreferencing dev covers both.
+			udev_device_unref(dev);
+		}
+	}
+
+	if (info->name[0] == '\0' && info->chipset[0] == '\0')
+		return B_UNSUPPORTED;
+
+	return B_OK;
 }
 
 
@@ -1446,6 +1506,25 @@ DrmHWInterface::CopyBackToFront(const BRegion& region)
 
 
 void
+DrmHWInterface::_DisableHardwareCursor()
+{
+	if (fFd < 0)
+		return;
+
+	struct modeset_dev* dev = get_dev();
+	if (dev == NULL)
+		return;
+
+	// Legacy ioctl can return success without clearing the plane FB on
+	// atomic-capable drivers, so branch the same way the plane was armed.
+	if (fCursorUsesAtomic)
+		_AtomicSetCursor(0, 0, 0, 0, 0, 0);
+	else
+		drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+}
+
+
+void
 DrmHWInterface::SetCursor(ServerCursor* cursor)
 {
 	if (fDragBitmap.IsSet())
@@ -1458,12 +1537,9 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 		return;
 
 	if (cursor == NULL) {
-		if (dev->cursor_ok) {
-			drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
-			fHardwareCursorEnabled = false;
-		} else {
-			fHardwareCursorEnabled = false;
-		}
+		if (dev->cursor_ok)
+			_DisableHardwareCursor();
+		fHardwareCursorEnabled = false;
 		return;
 	}
 
@@ -1482,7 +1558,7 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 	const int32  py  = (int32)fCursorLocation.y - (int32)hot.y;
 
 	int ret;
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb) {
+	if (fCursorUsesAtomic) {
 		ret = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			px, py, 64, 64) == B_OK) ? 0 : -1;
 	} else {
@@ -1515,10 +1591,7 @@ DrmHWInterface::SetCursorVisible(bool visible)
 		return;
 
 	if (!visible) {
-		if (fAtomicSupported && fCursorPlaneId)
-			_AtomicSetCursor(0, 0, 0, 0, 0, 0);
-		else
-			drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+		_DisableHardwareCursor();
 	} else {
 		BPoint hot(0, 0);
 		if (fCursor.IsSet())
@@ -1526,14 +1599,20 @@ DrmHWInterface::SetCursorVisible(bool visible)
 		const int32 px = (int32)fCursorLocation.x - (int32)hot.x;
 		const int32 py = (int32)fCursorLocation.y - (int32)hot.y;
 
-		if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb)
-			_AtomicSetCursor(dev->cursor_fb, dev->crtc,
-				px, py, dev->cursor_w, dev->cursor_h);
-		else {
-			drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
+		// fHardwareCursorEnabled must track the actual result, or
+		// _DrawCursor() and the hardware plane both draw at once.
+		int ret;
+		if (fCursorUsesAtomic) {
+			ret = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
+				px, py, dev->cursor_w, dev->cursor_h) == B_OK) ? 0 : -1;
+		} else {
+			ret = drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
 				dev->cursor_w, dev->cursor_h);
-			drmModeMoveCursor(fFd, dev->crtc, px, py);
+			if (ret == 0)
+				drmModeMoveCursor(fFd, dev->crtc, px, py);
 		}
+
+		fHardwareCursorEnabled = (ret == 0);
 	}
 }
 
@@ -1546,16 +1625,9 @@ DrmHWInterface::SetDragBitmap(const ServerBitmap* bitmap,
 
 	if (bitmap != NULL) {
 		// Disable the HW sprite before delegating to base so the
-		// software composite path owns the drag visual. Use the
-		// atomic path when supported — legacy drmModeSetCursor can
-		// return success without clearing the plane FB on atomic
-		// drivers (root cause of the "two cursors" symptom).
-		if (dev && dev->cursor_ok && fHardwareCursorEnabled) {
-			if (fAtomicSupported && fCursorPlaneId)
-				_AtomicSetCursor(0, 0, 0, 0, 0, 0);
-			else
-				drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
-		}
+		// software composite path owns the drag visual.
+		if (dev && dev->cursor_ok && fHardwareCursorEnabled)
+			_DisableHardwareCursor();
 		fHardwareCursorEnabled = false;
 		fCursorObscured = false;
 		fCursorVisible = true;
@@ -1600,7 +1672,7 @@ DrmHWInterface::MoveCursorTo(float x, float y)
 	const int32 px = (int32)floorf(x - hot.x);
 	const int32 py = (int32)floorf(y - hot.y);
 
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb)
+	if (fCursorUsesAtomic)
 		_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			px, py, dev->cursor_w, dev->cursor_h);
 	else
@@ -1726,33 +1798,43 @@ void
 DrmHWInterface::_ProbeCursor()
 {
 	struct modeset_dev* dev = get_dev();
-	if (dev == NULL || dev->cursor_handle == 0)
-		return;
-
-	int r = drmModeSetCursor(fFd, dev->crtc,
-		dev->cursor_handle, dev->cursor_w, dev->cursor_h);
-	if (r == 0) {
-		fHardwareCursorEnabled = true;
-		drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+	if (dev == NULL || dev->cursor_handle == 0) {
+		fprintf(stderr, "DRM: no cursor buffer, using software cursor\n");
+		fHardwareCursorEnabled = false;
 		return;
 	}
 
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb) {
+	// Probe atomic first: a legacy success here could mask an atomic arm
+	// that fails in production, which is the path SetCursor() actually uses.
+	const bool canAtomic
+		= fAtomicSupported && fCursorPlaneId != 0 && dev->cursor_fb != 0;
+
+	int r = -1;
+	if (canAtomic) {
 		r = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			0, 0, dev->cursor_w, dev->cursor_h) == B_OK) ? 0 : -1;
 		if (r == 0) {
+			fprintf(stderr, "DRM: hardware cursor via atomic plane\n");
+			fCursorUsesAtomic = true;
 			fHardwareCursorEnabled = true;
-			_AtomicSetCursor(0, 0, 0, 0, 0, 0);
+			_DisableHardwareCursor();
 			return;
 		}
-		fprintf(stderr,
-			"DRM: hardware cursor not supported (legacy: %s, atomic: "
-			"failed), using software cursor\n", strerror(-r));
-	} else {
-		fprintf(stderr,
-			"DRM: hardware cursor not supported (%s), using software "
-			"cursor\n", strerror(-r));
 	}
+
+	fCursorUsesAtomic = false;
+	r = drmModeSetCursor(fFd, dev->crtc,
+		dev->cursor_handle, dev->cursor_w, dev->cursor_h);
+	if (r == 0) {
+		fprintf(stderr, "DRM: hardware cursor via legacy ioctl\n");
+		fHardwareCursorEnabled = true;
+		_DisableHardwareCursor();
+		return;
+	}
+
+	fprintf(stderr,
+		"DRM: hardware cursor not supported (%s), using software "
+		"cursor\n", strerror(-r));
 	fHardwareCursorEnabled = false;
 }
 
@@ -1896,6 +1978,44 @@ DrmHWInterface::_DiscoverCrtcProps(uint32_t crtc_id)
 		drmModeFreeProperty(prop);
 	}
 	drmModeFreeObjectProperties(props);
+}
+
+
+// Determines panel orientation (issue #229). Only the debug override is
+// implemented so far: no read of the kernel's "panel orientation"
+// connector property, no DMI fallback table (see
+// archive/panel-rotation-plan.md Stage 0). Both default to NORMAL, which
+// matches today's existing (correct, for landscape panels) behavior, so
+// this is a no-op unless VOS_PANEL_ORIENTATION is set. The override
+// exists so rotation Stages 1-4 can be developed and tested without
+// portrait hardware, and so the rotation-direction sign convention can be
+// flipped on real hardware for debugging without a rebuild.
+void
+DrmHWInterface::_DiscoverPanelOrientation()
+{
+	fPanelOrientation = PANEL_ORIENTATION_NORMAL;
+
+	const char* value = getenv("VOS_PANEL_ORIENTATION");
+	if (value == NULL || value[0] == '\0')
+		return;
+
+	if (strcmp(value, "normal") == 0 || strcmp(value, "0") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_NORMAL;
+	else if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_UPSIDE_DOWN;
+	else if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_LEFT_UP;
+	else if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_RIGHT_UP;
+	else {
+		fprintf(stderr, "DrmHWInterface: unrecognized VOS_PANEL_ORIENTATION "
+			"'%s' (want normal|upside-down|left-up|right-up or 0-3), "
+			"ignoring\n", value);
+		return;
+	}
+
+	fprintf(stderr, "DrmHWInterface: panel orientation overridden to "
+		"'%s' via VOS_PANEL_ORIENTATION\n", value);
 }
 
 

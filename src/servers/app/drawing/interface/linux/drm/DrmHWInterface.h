@@ -58,6 +58,19 @@ struct ConnProps {
 	uint32_t dpms;
 };
 
+// Mirrors the kernel's "panel orientation" connector property values
+// (drm_connector.h, DRM_MODE_PANEL_ORIENTATION_*) so a future real
+// property read can assign straight into this enum. See
+// archive/panel-rotation-plan.md (issue #229). Only the NORMAL default
+// and the VOS_PANEL_ORIENTATION debug override are wired up today; the
+// kernel property/DMI table lookup is not implemented yet.
+enum PanelOrientation {
+	PANEL_ORIENTATION_NORMAL      = 0,
+	PANEL_ORIENTATION_UPSIDE_DOWN = 1,
+	PANEL_ORIENTATION_LEFT_UP     = 2,
+	PANEL_ORIENTATION_RIGHT_UP    = 3
+};
+
 class DrmBuffer;
 
 class DrmHWInterface : public HWInterface {
@@ -157,11 +170,13 @@ private:
 			int					_CrtcIndex(uint32_t crtc_id);
 			void				_ProbeAtomic();
 			void				_ProbeCursor();
+			void				_DisableHardwareCursor();
 			void				_DiscoverProperties();
 			void				_DiscoverPlaneProps(uint32_t plane_id,
 									PlaneProps& props);
 			void				_DiscoverCrtcProps(uint32_t crtc_id);
 			void				_DiscoverConnProps(uint32_t conn_id);
+			void				_DiscoverPanelOrientation();
 
 			status_t			_AtomicModeset(uint32_t fb_id,
 									drmModeModeInfo* mode);
@@ -224,6 +239,8 @@ private:
 			bool				fAtomicSupported;
 			uint32_t			fPrimaryPlaneId;
 			uint32_t			fCursorPlaneId;
+			// Which API armed the cursor plane; set once by _ProbeCursor().
+			bool				fCursorUsesAtomic;
 			uint32_t			fModeBlobId;
 			struct PlaneProps	fPlaneProps;
 			struct PlaneProps	fCursorPlaneProps;
@@ -232,6 +249,10 @@ private:
 
 			bool				fVRRSupported;
 			bool				fVRREnabled;
+
+			// See archive/panel-rotation-plan.md; only NORMAL/the
+			// VOS_PANEL_ORIENTATION override are wired up so far.
+			PanelOrientation	fPanelOrientation;
 };
 
 #endif

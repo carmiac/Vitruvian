@@ -48,6 +48,10 @@
 #include <gbm.h>
 #endif
 
+/* Matches virtio_gpu's own no-EDID default (XRES_DEF/YRES_DEF). */
+#define MODESET_FALLBACK_MIN_W	1024
+#define MODESET_FALLBACK_MIN_H	768
+
 /*struct modeset_dev;
 static int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 			     struct modeset_dev *dev);
@@ -236,6 +240,41 @@ int modeset_prepare(int fd)
 	return 0;
 }
 
+
+/* True if the connector's "EDID" property blob is non-empty; some
+ * drivers set PREFERRED on a synthetic mode even without one. */
+static bool
+modeset_conn_has_edid(int fd, drmModeConnector *conn)
+{
+	drmModeObjectProperties *props = drmModeObjectGetProperties(fd,
+		conn->connector_id, DRM_MODE_OBJECT_CONNECTOR);
+	if (props == NULL)
+		return false;
+
+	bool has_edid = false;
+	for (uint32_t i = 0; i < props->count_props; i++) {
+		drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
+		if (prop == NULL)
+			continue;
+
+		if (strcmp(prop->name, "EDID") == 0
+				&& (prop->flags & DRM_MODE_PROP_BLOB)) {
+			drmModePropertyBlobRes *blob =
+				drmModeGetPropertyBlob(fd, props->prop_values[i]);
+			has_edid = (blob != NULL && blob->length > 0);
+			if (blob != NULL)
+				drmModeFreePropertyBlob(blob);
+			drmModeFreeProperty(prop);
+			break;
+		}
+		drmModeFreeProperty(prop);
+	}
+
+	drmModeFreeObjectProperties(props);
+	return has_edid;
+}
+
+
 /*
  * Now we dig deeper into setting up a single connector. As described earlier,
  * we need to check several things first:
@@ -291,18 +330,80 @@ int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
 				? " [preferred]" : "");
 	}
 
-	/* Prefer the EDID-flagged preferred mode; fall back to modes[0]
-	 * (which is conventionally the highest-resolution mode).  Matters
-	 * for TVs/projectors where modes[0] isn't always the right pick. */
-	drmModeModeInfo* picked = NULL;
+	drmModeModeInfo* preferred = NULL;
 	for (int i = 0; i < conn->count_modes; i++) {
 		if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
-			picked = &conn->modes[i];
+			preferred = &conn->modes[i];
 			break;
 		}
 	}
-	if (picked == NULL)
-		picked = &conn->modes[0];
+
+	/* Without an EDID, a driver's no-info minimum (e.g. virtio-gpu's
+	 * 640x480) can masquerade as PREFERRED; require it clear the floor. */
+	drmModeModeInfo* picked = NULL;
+	if (preferred != NULL
+			&& (modeset_conn_has_edid(fd, conn)
+				|| (preferred->hdisplay >= MODESET_FALLBACK_MIN_W
+					&& preferred->vdisplay >= MODESET_FALLBACK_MIN_H)))
+		picked = preferred;
+
+	/* Skip the current CRTC mode too; take the smallest above the floor,
+	 * not the largest, which may be a synthetic ceiling. */
+	if (picked == NULL) {
+		for (int i = 0; i < conn->count_modes; i++) {
+			uint32_t w = conn->modes[i].hdisplay;
+			uint32_t h = conn->modes[i].vdisplay;
+			if (w < MODESET_FALLBACK_MIN_W || h < MODESET_FALLBACK_MIN_H)
+				continue;
+			if (picked == NULL
+					|| w * h < (uint32_t)picked->hdisplay * picked->vdisplay)
+				picked = &conn->modes[i];
+		}
+		/* Nothing clears the floor. Rather than accept whatever the
+		 * driver leads with, which is 640x480 on a mode list with no
+		 * display behind it, step down the standard sizes and take the
+		 * largest one actually offered. Anything at or above the floor
+		 * was already handled by the loop above. */
+		if (picked == NULL) {
+			static const struct { uint32_t w, h; } kLadder[] = {
+				{ 800, 600 }, { 640, 480 }
+			};
+
+			for (size_t l = 0;
+					l < sizeof(kLadder) / sizeof(kLadder[0]) && picked == NULL;
+					l++) {
+				for (int i = 0; i < conn->count_modes; i++) {
+					if (conn->modes[i].hdisplay == kLadder[l].w
+							&& conn->modes[i].vdisplay == kLadder[l].h) {
+						picked = &conn->modes[i];
+						break;
+					}
+				}
+			}
+
+			if (picked != NULL) {
+				fprintf(stderr, "no mode clears %dx%d; stepped down to "
+					"%ux%u of %d modes\n", MODESET_FALLBACK_MIN_W,
+					MODESET_FALLBACK_MIN_H, picked->hdisplay,
+					picked->vdisplay, conn->count_modes);
+			}
+		}
+
+		if (picked == NULL) {
+			/* Not even the ladder matched, so a small panel is simply
+			 * small and its own preference is the best guess. */
+			picked = preferred != NULL ? preferred : &conn->modes[0];
+			fprintf(stderr, "no mode clears %dx%d; kept the %s of %d\n",
+				MODESET_FALLBACK_MIN_W, MODESET_FALLBACK_MIN_H,
+				preferred != NULL ? "preferred" : "first",
+				conn->count_modes);
+		} else if (picked->hdisplay >= MODESET_FALLBACK_MIN_W
+				&& picked->vdisplay >= MODESET_FALLBACK_MIN_H) {
+			fprintf(stderr, "untrusted mode list; picked smallest "
+				"above %dx%d of %d modes\n", MODESET_FALLBACK_MIN_W,
+				MODESET_FALLBACK_MIN_H, conn->count_modes);
+		}
+	}
 
 	memcpy(&dev->mode, picked, sizeof(dev->mode));
 	dev->width  = picked->hdisplay;
