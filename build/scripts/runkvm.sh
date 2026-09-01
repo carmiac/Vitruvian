@@ -2,11 +2,13 @@
 set -e
 basedir=`realpath ./`
 
-log=0; stdout=0
+log=0; stdout=0; vga_args="-vga none -device virtio-vga,xres=1280,yres=800,edid=on"
 for a in "$@"; do
   case "$a" in
     --enable-console-log) log=1 ;;
     --enable-console-stdout) stdout=1 ;;
+    # for reproducing bochs-drm's no-cursor-plane / no-EDID paths
+    --use-bochs-drm) vga_args="-vga std" ;;
   esac
 done
 logfile="$basedir/vitruvian-console.log"
@@ -23,4 +25,5 @@ qemu-system-x86_64 \
   -m 8G -cpu host -smp sockets=1,cores=2,threads=2 --enable-kvm \
   -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
   -device virtio-net-pci,netdev=mynet \
+  $vga_args \
   $serial_args

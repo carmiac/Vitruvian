@@ -671,6 +671,8 @@ systemctl mask getty@tty1.service 2>/dev/null || true
 #  - systemd-remount-fs: we boot rw via cmdline, nothing to remount.
 #  - systemd-ssh-generator: pokes AF_VSOCK CIDs that don't exist under
 #    qemu user-mode networking; emits an error every boot.
+#  - serial-getty@ttyS0: some hypervisors (e.g. VirtualBox) don't expose
+#    the serial port; agetty then fails and respawns in a loop.
 #  - dev-hugepages/dev-mqueue/sys-fs-fuse-connections/sys-kernel-{config,debug,tracing}:
 #    kernel pseudo-FS that this kernel build does not expose; the static
 #    mount units fail every boot for no reason. Masking is the upstream
@@ -679,6 +681,7 @@ systemctl mask getty@tty1.service 2>/dev/null || true
 for _u in \\
     systemd-remount-fs.service \\
     systemd-ssh-generator.service \\
+    serial-getty@ttyS0.service \\
     dev-hugepages.mount \\
     dev-mqueue.mount \\
     sys-fs-fuse-connections.mount \\
@@ -687,7 +690,12 @@ for _u in \\
     sys-kernel-tracing.mount \\
     ctrl-alt-del.target; do
     systemctl mask \"\$_u\" 2>/dev/null || true
-done" || die "_common_chroot_setup chroot bash-c failed"
+done
+
+# Generators run before any unit exists, so masking the .service above
+# never stops this one; systemd.generator(7) masks it via symlink.
+mkdir -p /etc/systemd/system-generators
+ln -sf /dev/null /etc/systemd/system-generators/systemd-ssh-generator" || die "_common_chroot_setup chroot bash-c failed"
 }
 
 create_raspberry() {
