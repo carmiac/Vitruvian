@@ -252,7 +252,7 @@ insmod gfxterm
 search --no-floppy --fs-uuid --set=root $_root_uuid
 set timeout=1
 menuentry "Vitruvian" {
-    linux (\$root)/vmlinuz root=UUID=$_root_uuid rw quiet splash loglevel=3 systemd.show_status=false rd.udev.log_priority=3 console=ttyS0,115200 earlyprintk=ttyS0,115200 ignore_loglevel
+    linux (\$root)/vmlinuz root=UUID=$_root_uuid rw quiet splash loglevel=3 systemd.show_status=false rd.udev.log_priority=3 console=ttyS0,115200 earlyprintk=ttyS0,115200
     initrd (\$root)/initrd.img
 }
 menuentry "Vitruvian (Safe Mode)" {
@@ -422,7 +422,8 @@ chmod 0700 /root/.ssh
 chown root:root /root/.ssh
 getent passwd vos-live >/dev/null && echo "vos-live:live" | chpasswd || true
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable ssh.service 2>/dev/null || true
+    # ssh.service stays disabled; vos-sshdebug.service starts sshd for one
+    # boot when vitruvian.sshdebug is on the cmdline.
     systemctl enable vos-sshdebug.service 2>/dev/null || true
 fi
 SSHEOF
@@ -464,7 +465,7 @@ set default="0"
 set timeout=5
 set hidden_timeout=0
 menuentry "Vitruvian Live" {
-    linux /vmlinuz boot=live noeject quiet splash loglevel=3 systemd.show_status=false rd.udev.log_priority=3 console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 ignore_loglevel oops=panic panic_on_warn=1 panic=0
+    linux /vmlinuz boot=live noeject quiet splash loglevel=3 systemd.show_status=false rd.udev.log_priority=3 console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 oops=panic panic_on_warn=1 panic=0
     initrd /initrd
 }
 menuentry "Vitruvian Live (Safe Mode)" {
@@ -636,6 +637,12 @@ chmod 0644 /etc/hosts
 # Root locked; Installer's Advanced mode is the only way to set a root
 # password on a target.
 passwd -l root 2>/dev/null || true
+
+# openssh-server's postinst enables sshd by default (on Debian 13, via the
+# socket rather than the service); disable both so sshd only runs via
+# vos-sshdebug.service.
+systemctl disable ssh.service 2>/dev/null || true
+systemctl disable ssh.socket 2>/dev/null || true
 
 # Live/raw marker — Installer strips this on --commit-setup.
 mkdir -p /etc/vos
