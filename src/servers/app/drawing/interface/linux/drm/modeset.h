@@ -69,6 +69,7 @@ extern "C"
 #endif
 
 struct modeset_dev* get_dev();
+const drmModeModeInfo* modeset_pick_mode(int fd, drmModeConnector *conn);
 int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 			     struct modeset_dev *dev);
 int modeset_create_fb(int fd, struct modeset_dev *dev);
@@ -93,6 +94,8 @@ struct modeset_dev* modeset_dev_create(int fd, uint32_t connector_id);
 void modeset_dev_destroy(int fd, struct modeset_dev* dev);
 
 void modeset_cleanup(int fd);
+/* Returns <0 errno, 0 nothing to do, or 1 if an already-tracked connector's
+ * geometry changed (caller must reapply via DrmHWInterface::SetMode()). */
 int  modeset_add_connector(int fd, uint32_t connector_id);
 void modeset_remove_connector(int fd, uint32_t connector_id);
 

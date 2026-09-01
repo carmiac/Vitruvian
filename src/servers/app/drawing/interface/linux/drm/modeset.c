@@ -304,31 +304,14 @@ modeset_conn_has_edid(int fd, drmModeConnector *conn)
  *     framebuffer onto the monitor.
  */
 
-int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
-			     struct modeset_dev *dev)
+/* Mode policy shared by modeset_setup_dev() and GetPreferredMode(). The
+ * floor/ladder below only applies without EDID, since an EDID-less output
+ * leads with a bogus small mode. Returns NULL if conn->count_modes is 0. */
+const drmModeModeInfo*
+modeset_pick_mode(int fd, drmModeConnector *conn)
 {
-	int ret;
-
-	/* check if a monitor is connected */
-	if (conn->connection != DRM_MODE_CONNECTED) {
-		fprintf(stderr, "ignoring unused connector %u\n",
-			conn->connector_id);
-		return -ENOENT;
-	}
-
-	/* check if there is at least one valid mode */
-	if (conn->count_modes == 0) {
-		fprintf(stderr, "no valid mode for connector %u\n",
-			conn->connector_id);
-		return -EFAULT;
-	}
-
-	for (int i = 0; i < conn->count_modes; i++) {
-		fprintf(stderr, "mode %ux%u%s\n",
-			conn->modes[i].hdisplay, conn->modes[i].vdisplay,
-			(conn->modes[i].type & DRM_MODE_TYPE_PREFERRED)
-				? " [preferred]" : "");
-	}
+	if (conn->count_modes == 0)
+		return NULL;
 
 	drmModeModeInfo* preferred = NULL;
 	for (int i = 0; i < conn->count_modes; i++) {
@@ -403,6 +386,41 @@ int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
 				"above %dx%d of %d modes\n", MODESET_FALLBACK_MIN_W,
 				MODESET_FALLBACK_MIN_H, conn->count_modes);
 		}
+	}
+
+	return picked;
+}
+
+
+int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
+			     struct modeset_dev *dev)
+{
+	int ret;
+
+	if (conn->connection != DRM_MODE_CONNECTED) {
+		fprintf(stderr, "ignoring unused connector %u\n",
+			conn->connector_id);
+		return -ENOENT;
+	}
+
+	if (conn->count_modes == 0) {
+		fprintf(stderr, "no valid mode for connector %u\n",
+			conn->connector_id);
+		return -EFAULT;
+	}
+
+	for (int i = 0; i < conn->count_modes; i++) {
+		fprintf(stderr, "mode %ux%u%s\n",
+			conn->modes[i].hdisplay, conn->modes[i].vdisplay,
+			(conn->modes[i].type & DRM_MODE_TYPE_PREFERRED)
+				? " [preferred]" : "");
+	}
+
+	const drmModeModeInfo* picked = modeset_pick_mode(fd, conn);
+	if (picked == NULL) {
+		fprintf(stderr, "no usable mode for connector %u\n",
+			conn->connector_id);
+		return -EFAULT;
 	}
 
 	memcpy(&dev->mode, picked, sizeof(dev->mode));
@@ -967,11 +985,32 @@ modeset_dev_destroy(int fd, struct modeset_dev* dev)
 int
 modeset_add_connector(int fd, uint32_t connector_id)
 {
-	/* Check not already in list */
+	/* Already tracked: diff the reprobed mode instead of assuming
+	 * nothing changed. Does not mutate dev->* here, see header comment. */
 	struct modeset_dev* iter;
 	for (iter = modeset_list; iter; iter = iter->next) {
-		if (iter->conn == connector_id)
+		if (iter->conn != connector_id)
+			continue;
+
+		drmModeConnector* conn = drmModeGetConnector(fd, connector_id);
+		if (conn == NULL)
 			return 0;
+		if (conn->connection != DRM_MODE_CONNECTED) {
+			drmModeFreeConnector(conn);
+			return 0;
+		}
+
+		const drmModeModeInfo* picked = modeset_pick_mode(fd, conn);
+		int changed = picked != NULL
+			&& (picked->hdisplay != iter->width
+				|| picked->vdisplay != iter->height);
+		if (changed) {
+			fprintf(stderr, "hotplug: connector %u geometry changed "
+				"%ux%u -> %ux%u\n", connector_id, iter->width,
+				iter->height, picked->hdisplay, picked->vdisplay);
+		}
+		drmModeFreeConnector(conn);
+		return changed ? 1 : 0;
 	}
 
 	struct modeset_dev* dev = modeset_dev_create(fd, connector_id);

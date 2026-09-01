@@ -58,12 +58,9 @@ struct ConnProps {
 	uint32_t dpms;
 };
 
-// Mirrors the kernel's "panel orientation" connector property values
-// (drm_connector.h, DRM_MODE_PANEL_ORIENTATION_*) so a future real
-// property read can assign straight into this enum. See
-// archive/panel-rotation-plan.md (issue #229). Only the NORMAL default
-// and the VOS_PANEL_ORIENTATION debug override are wired up today; the
-// kernel property/DMI table lookup is not implemented yet.
+// Values match the kernel's "panel orientation" connector property
+// (drm_connector.h, DRM_MODE_PANEL_ORIENTATION_*) so a property read casts
+// straight into this enum.
 enum PanelOrientation {
 	PANEL_ORIENTATION_NORMAL      = 0,
 	PANEL_ORIENTATION_UPSIDE_DOWN = 1,
@@ -145,6 +142,12 @@ private:
 			void				_EventThreadMain();
 			void				_RestoreDisplay();
 			void				_HandleHotplug();
+			void				_DrainPendingFlip();
+			void				_ScheduleResize();
+	static	int32				_ResizeThreadEntry(void* data);
+			void				_ApplyResize();
+	static	void				_FillModeInfo(display_mode& mode,
+									const drmModeModeInfo& m);
 
 	static	void				_PageFlipHandler(int fd, unsigned int frame,
 									unsigned int sec, unsigned int usec,
@@ -177,6 +180,8 @@ private:
 			void				_DiscoverCrtcProps(uint32_t crtc_id);
 			void				_DiscoverConnProps(uint32_t conn_id);
 			void				_DiscoverPanelOrientation();
+			bool				_ApplyDmiOrientationQuirk(uint32_t width,
+									uint32_t height);
 
 			status_t			_AtomicModeset(uint32_t fb_id,
 									drmModeModeInfo* mode);
@@ -204,6 +209,9 @@ private:
 			std::atomic<bool>	fRunning;
 
 			thread_id			fEventThread;
+			thread_id			fResizeThread;
+			std::atomic<bool>	fResizeBusy;
+			std::atomic<bool>	fResizePending;
 			sem_id				fSessionSem;
 
 			struct udev*		fUdev;
@@ -250,8 +258,7 @@ private:
 			bool				fVRRSupported;
 			bool				fVRREnabled;
 
-			// See archive/panel-rotation-plan.md; only NORMAL/the
-			// VOS_PANEL_ORIENTATION override are wired up so far.
+			// Detected but not yet consumed; issue #229, Stage 0 only.
 			PanelOrientation	fPanelOrientation;
 };
 
