@@ -122,14 +122,10 @@ LocaleWindow::LocaleWindow()
 				}
 			}
 
-			LanguageListItem* item;
-			if (currentLanguage.IsCountrySpecific()) {
-				item = new LanguageListItemWithFlag(name, currentID.String(),
-					currentLanguage.Code(), currentLanguage.CountryCode());
-			} else {
-				item = new LanguageListItem(name, currentID.String(),
-					currentLanguage.Code());
-			}
+			LanguageListItem* item = new LanguageListItem(name,
+				currentID.String(), currentLanguage.Code(),
+				currentLanguage.IsCountrySpecific()
+					? currentLanguage.CountryCode() : NULL);
 
 			if (currentLanguage.IsCountrySpecific()
 				&& currentToplevelItem != NULL
@@ -208,14 +204,10 @@ LocaleWindow::LocaleWindow()
 		BString conventionsName;
 		conventions.GetName(conventionsName);
 
-		LanguageListItem* item;
-		if (conventions.AreCountrySpecific()) {
-			item = new LanguageListItemWithFlag(conventionsName, conventionsID,
-				conventions.LanguageCode(), conventions.CountryCode());
-		} else {
-			item = new LanguageListItem(conventionsName, conventionsID,
-				conventions.LanguageCode());
-		}
+		LanguageListItem* item = new LanguageListItem(conventionsName,
+			conventionsID, conventions.LanguageCode(),
+			conventions.AreCountrySpecific()
+				? conventions.CountryCode() : NULL);
 		if (!strcmp(conventionsID, "en_US"))
 			fDefaultConventionsItem = item;
 		if (conventions.AreCountrySpecific()

@@ -477,6 +477,20 @@ BootPromptWindow::_PopulateLanguages()
 	BLocaleRoster::Default()->GetAvailableCatalogs(&installedCatalogs,
 		"x-vnd.Haiku-FirstBootPrompt");
 
+	// English is the source language, so it ships no catalog of its own and
+	// the scan above never finds it. Offer it anyway; it is always built in.
+	bool haveEnglish = false;
+	const char* catalogID;
+	for (int32 i = 0; installedCatalogs.FindString("language", i, &catalogID)
+			== B_OK; i++) {
+		if (strcmp(catalogID, "en") == 0) {
+			haveEnglish = true;
+			break;
+		}
+	}
+	if (!haveEnglish)
+		installedCatalogs.AddString("language", "en");
+
 	BFont font;
 	fLanguagesListView->GetFont(&font);
 

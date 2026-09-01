@@ -34,11 +34,13 @@
 
 
 LanguageListItem::LanguageListItem(const char* text, const char* id,
-	const char* languageCode)
+	const char* languageCode, const char* countryCode)
 	:
 	BStringItem(text),
 	fID(id),
-	fCode(languageCode)
+	fCode(languageCode),
+	fCountryCode(countryCode),
+	fIcon(NULL)
 {
 }
 
@@ -47,15 +49,76 @@ LanguageListItem::LanguageListItem(const LanguageListItem& other)
 	:
 	BStringItem(other.Text()),
 	fID(other.fID),
-	fCode(other.fCode)
+	fCode(other.fCode),
+	fCountryCode(other.fCountryCode),
+	fIcon(other.fIcon != NULL ? new BBitmap(*other.fIcon) : NULL)
 {
+}
+
+
+LanguageListItem::~LanguageListItem()
+{
+	delete fIcon;
+}
+
+
+void
+LanguageListItem::Update(BView* owner, const BFont* font)
+{
+	BStringItem::Update(owner, font);
+
+	// Reserve the icon column whether or not a flag is found, so the labels
+	// line up with the rows that have one.
+	float iconSize = Height();
+	SetWidth(Width() + iconSize + be_control_look->DefaultLabelSpacing());
+
+	delete fIcon;
+	fIcon = new(std::nothrow) BBitmap(BRect(0, 0, iconSize - 1, iconSize - 1),
+		B_RGBA32);
+	if (fIcon == NULL)
+		return;
+
+	// A generic language row has no country of its own; the roster falls back
+	// to the language's default country.
+	status_t status = fCountryCode.IsEmpty()
+		? BLocaleRoster::Default()->GetFlagIconForLanguage(fIcon,
+			fCode.String())
+		: BLocaleRoster::Default()->GetFlagIconForCountry(fIcon,
+			fCountryCode.String());
+	if (status != B_OK) {
+		delete fIcon;
+		fIcon = NULL;
+	}
 }
 
 
 void
 LanguageListItem::DrawItem(BView* owner, BRect frame, bool complete)
 {
-	DrawItemWithTextOffset(owner, frame, complete, 0);
+	float iconSize = fIcon != NULL && fIcon->IsValid()
+		? fIcon->Bounds().Width() : Height();
+	float spacing = be_control_look->DefaultLabelSpacing();
+
+	DrawItemWithTextOffset(owner, frame, complete, iconSize + spacing);
+
+	BRect iconFrame(frame.left + spacing, frame.top,
+		frame.left + spacing + iconSize - 1, frame.top + iconSize - 1);
+
+	if (fIcon != NULL && fIcon->IsValid()) {
+		owner->SetDrawingMode(B_OP_OVER);
+		owner->DrawBitmap(fIcon, iconFrame);
+		owner->SetDrawingMode(B_OP_COPY);
+		return;
+	}
+
+	rgb_color border = ui_color(B_CONTROL_BORDER_COLOR);
+	border.alpha = 90;
+	rgb_color highColor = owner->HighColor();
+	owner->SetDrawingMode(B_OP_ALPHA);
+	owner->SetHighColor(border);
+	owner->StrokeRoundRect(iconFrame.InsetByCopy(0, iconSize / 6), 2, 2);
+	owner->SetHighColor(highColor);
+	owner->SetDrawingMode(B_OP_COPY);
 }
 
 
@@ -102,78 +165,6 @@ LanguageListItem::DrawItemWithTextOffset(BView* owner, BRect frame,
 
 	owner->SetHighColor(highColor);
 	owner->SetLowColor(lowColor);
-}
-
-
-// #pragma mark -
-
-
-LanguageListItemWithFlag::LanguageListItemWithFlag(const char* text,
-	const char* id, const char* languageCode, const char* countryCode)
-	:
-	LanguageListItem(text, id, languageCode),
-	fCountryCode(countryCode),
-	fIcon(NULL)
-{
-}
-
-
-LanguageListItemWithFlag::LanguageListItemWithFlag(
-	const LanguageListItemWithFlag& other)
-	:
-	LanguageListItem(other),
-	fCountryCode(other.fCountryCode),
-	fIcon(other.fIcon != NULL ? new BBitmap(*other.fIcon) : NULL)
-{
-}
-
-
-LanguageListItemWithFlag::~LanguageListItemWithFlag()
-{
-	delete fIcon;
-}
-
-
-void
-LanguageListItemWithFlag::Update(BView* owner, const BFont* font)
-{
-	LanguageListItem::Update(owner, font);
-
-	float iconSize = Height();
-	SetWidth(Width() + iconSize + be_control_look->DefaultLabelSpacing());
-
-	if (fCountryCode.IsEmpty())
-		return;
-
-	fIcon = new(std::nothrow) BBitmap(BRect(0, 0, iconSize - 1, iconSize - 1),
-		B_RGBA32);
-	if (fIcon != NULL && BLocaleRoster::Default()->GetFlagIconForCountry(fIcon,
-			fCountryCode.String()) != B_OK) {
-		delete fIcon;
-		fIcon = NULL;
-	}
-}
-
-
-void
-LanguageListItemWithFlag::DrawItem(BView* owner, BRect frame, bool complete)
-{
-	if (fIcon == NULL || !fIcon->IsValid()) {
-		DrawItemWithTextOffset(owner, frame, complete, 0);
-		return;
-	}
-
-	float iconSize = fIcon->Bounds().Width();
-	DrawItemWithTextOffset(owner, frame, complete,
-		iconSize + be_control_look->DefaultLabelSpacing());
-
-	BRect iconFrame(frame.left + be_control_look->DefaultLabelSpacing(),
-		frame.top,
-		frame.left + iconSize - 1 + be_control_look->DefaultLabelSpacing(),
-		frame.top + iconSize - 1);
-	owner->SetDrawingMode(B_OP_OVER);
-	owner->DrawBitmap(fIcon, iconFrame);
-	owner->SetDrawingMode(B_OP_COPY);
 }
 
 
