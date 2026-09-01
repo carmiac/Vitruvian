@@ -567,6 +567,12 @@ InputServer::MessageReceived(BMessage* message)
 				fMousePos.y * frame.Height() / fFrame.Height());
 			fFrame = frame;
 
+			// Devices place the cursor against their own copy of screen size.
+			BMessage bounds;
+			bounds.AddRect("screen_bounds", frame);
+			ControlDevices(NULL, B_POINTING_DEVICE,
+				B_SCREEN_BOUNDS_CHANGED, &bounds);
+
 			BMessage set;
 			set.AddPoint("where", pos);
 			HandleSetMousePosition(&set, NULL);

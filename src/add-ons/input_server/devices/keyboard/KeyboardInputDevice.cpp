@@ -10,6 +10,8 @@
 
 #include "KeyboardInputDevice.h"
 
+#include "UdevDeviceName.h"
+
 #include <errno.h>
 #include <new>
 #include <stdio.h>
@@ -319,7 +321,18 @@ KeyboardDevice::GetDescription(BMessage* message) const
 	if (fDescription.IsEmpty())
 		return B_NAME_NOT_FOUND;
 
-	return message->AddString("description", fDescription.String());
+	status_t status = message->AddString("description", fDescription.String());
+	if (status != B_OK)
+		return status;
+
+	BString model;
+	int32 role = UDEV_ROLE_UNKNOWN;
+	udev_device_name(fPath, model, role);
+	if (!model.IsEmpty())
+		message->AddString("short_description", model);
+	message->AddInt32("role", role);
+
+	return B_OK;
 }
 
 

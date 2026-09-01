@@ -37,6 +37,20 @@ enum {
 
 	// Control() query: hardware name (distinct from identity/settings key)
 	B_GET_DEVICE_DESCRIPTION,
+
+	// Screen mode changed; "screen_bounds" carries the new frame.
+	B_SCREEN_BOUNDS_CHANGED,
+};
+
+
+// "role" in a B_GET_DEVICE_DESCRIPTION reply: what the device is, as
+// classified by the system rather than guessed from its name.
+enum {
+	UDEV_ROLE_UNKNOWN	= 0,
+	UDEV_ROLE_KEYBOARD,
+	UDEV_ROLE_MOUSE,
+	UDEV_ROLE_TOUCHPAD,
+	UDEV_ROLE_TABLET
 };
 
 namespace BPrivate {
