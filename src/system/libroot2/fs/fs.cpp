@@ -19,6 +19,22 @@
 #include "KernelDebug.h"
 
 
+// "dir" may itself be "/" here: unlike Haiku, Vitruvian mounts the boot
+// volume on the real root, and "%s/%s" would then yield "//leaf".
+static status_t
+join_path(const char* dir, const char* leaf, char* buffer, size_t bufferSize)
+{
+	size_t dirLength = strlen(dir);
+	bool hasTrailingSlash = dirLength > 0 && dir[dirLength - 1] == '/';
+	const char* format = hasTrailingSlash ? "%s%s" : "%s/%s";
+
+	int written = snprintf(buffer, bufferSize, format, dir, leaf);
+	if (written < 0 || (size_t)written >= bufferSize)
+		return B_BUFFER_OVERFLOW;
+
+	return B_OK;
+}
+
 
 status_t
 _kern_read_statx(int fd, const char* path, bool traverseLink,
@@ -394,9 +410,9 @@ _kern_entry_ref_to_path(dev_t device, ino_t node, const char* leaf,
 		if (strlcpy(userPath, mntDir, pathLength) >= pathLength)
 			return B_BUFFER_OVERFLOW;
 	} else {
-		if (snprintf(userPath, pathLength, "%s/%s", mntDir, leaf)
-				>= (int)pathLength)
-			return B_BUFFER_OVERFLOW;
+		status_t joinStatus = join_path(mntDir, leaf, userPath, pathLength);
+		if (joinStatus != B_OK)
+			return joinStatus;
 	}
 	return B_OK;
 }
@@ -441,10 +457,7 @@ _kern_entry_ref_to_path_by_fd(int fd, team_id team, const char* name,
 	if (ret != B_OK)
 		return ret;
 
-	if (snprintf(buffer, bufferSize, "%s/%s", resolvedPath, name) >= (int)bufferSize)
-		return B_BUFFER_OVERFLOW;
-
-	return B_OK;
+	return join_path(resolvedPath, name, buffer, bufferSize);
 }
 
 
