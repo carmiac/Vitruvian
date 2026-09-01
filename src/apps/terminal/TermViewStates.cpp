@@ -199,7 +199,7 @@ TermView::DefaultState::ModifiersChanged(int32 oldModifiers, int32 modifiers)
 
 
 //! The control character a key produces when Control is held, or -1.
-static int
+int
 control_character_for(int32 rawChar)
 {
 	// Digits deliberately absent: Terminal binds Command+1..9 to tab
@@ -238,21 +238,6 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
 	currentMessage->FindInt32("raw_char", &rawChar);
 
 	fView->_ActivateCursor(true);
-
-	// ctrl mode: Command sits on the physical Control key, so Command+letter
-	// is owed to the shell as a control character (^C, ^D, ^L). Not needed
-	// in Haiku's arrangement, where Control is free and arrives as
-	// B_CONTROL_KEY already.
-	if (fView->CommandIsControlKey()
-		&& (mod & (B_COMMAND_KEY | B_SHIFT_KEY)) == B_COMMAND_KEY) {
-		int control = control_character_for(rawChar);
-		if (control >= 0) {
-			char byte = (char)control;
-			fView->_ScrollTo(0, true);
-			fView->fShell->Write(&byte, 1);
-			return;
-		}
-	}
 
 	// Handle the Option key when used as Meta
 	bool interpretMetaKey = fView->TextBuffer()->IsMode(MODE_INTERPRET_META_KEY);
