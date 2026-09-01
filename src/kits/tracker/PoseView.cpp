@@ -1818,7 +1818,8 @@ BPoseView::CreateVolumePose(BVolume* volume)
 	if (root.GetEntry(&volumeEntry) != B_OK
 		|| volumeEntry.GetParent(&parent) != B_OK
 		|| parent.GetNodeRef(&dirNode) != B_OK) {
-		return;
+		// "/" has no parent; it is its own mount point.
+		dirNode = itemNode;
 	}
 
 	BPose* pose = EntryCreated(&dirNode, &itemNode, ref.name, 0);

@@ -4422,7 +4422,9 @@ WellKnowEntryList::AddOne(directory_which which, const char* path,
 WellKnowEntryList::WellKnowEntryList()
 {
 	AddOne(B_SYSTEM_DIRECTORY, "system");
-	AddOne((directory_which)B_BOOT_DISK, "/boot", "boot");
+	// Haiku mounts the boot volume on /boot; ours is the real root, and
+	// /boot here is the Linux kernel directory.
+	AddOne((directory_which)B_BOOT_DISK, "/", "boot");
 	AddOne(B_USER_DIRECTORY, "home");
 
 	AddOne(B_BEOS_FONTS_DIRECTORY, "fonts");
