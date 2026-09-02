@@ -63,6 +63,12 @@ set(TEST_LIBROOT_BINARIES
 	system_watching_test
 )
 
+set(TEST_GUI_BINARIES
+	ArrowShapeTest
+	LookTest
+	SliderTest
+)
+
 set(TEST_ADDONS
 	supporttest
 	storagetest
@@ -73,6 +79,7 @@ set(TEST_ADDONS
 )
 
 ImageInclude("/system/tests" ${TEST_BINARIES} ${TEST_VOS_BINARIES} ${TEST_KERNEL_BINARIES} ${TEST_LIBROOT_BINARIES} cppunit)
+ImageInclude("/system/tests/interface" ${TEST_GUI_BINARIES})
 ImageInclude("/system/tests/lib" ${TEST_ADDONS})
 ImageIncludeFile("src/tests/runsuite.sh" "/system/tests")
 ImageIncludeDir("src/tests/kits/storage/resources" "/system/tests")
