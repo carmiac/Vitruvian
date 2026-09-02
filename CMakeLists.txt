@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 project(VOS VERSION 0.6.1 LANGUAGES CXX C)
 
+set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
+	OWNER_READ OWNER_WRITE OWNER_EXECUTE
+	GROUP_READ GROUP_EXECUTE
+	WORLD_READ WORLD_EXECUTE)
+
 # TODO shouldn't we resolve an absolute path here? it kind of works
 # only if buildtools is in the project source dir, which...we don't
 # really want to constrain.
