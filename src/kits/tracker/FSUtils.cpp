@@ -541,7 +541,7 @@ FSGetPoseLocation(const BNode* node, BPoint* point)
 		return false;
 	}
 
-	if (poseInfo.fInitedDirectory == -1LL)
+	if (poseInfo.fInitedDirectory == kUninitedDirectory)
 		return false;
 
 	*point = poseInfo.fLocation;

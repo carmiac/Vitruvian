@@ -120,6 +120,11 @@ private:
 extern PeriodicUpdatePoses gPeriodicUpdatePoses;
 
 
+// ino_t is unsigned here and signed on Haiku, so the -1 sentinel needs the
+// cast or every comparison against it is signed against unsigned.
+const ino_t kUninitedDirectory = (ino_t)-1;
+
+
 class PoseInfo {
 	// PoseInfo is the structure that gets saved as attributes for every node
 	// on disk, defining the node's position and visibility
@@ -129,9 +134,10 @@ public:
 
 	bool fInvisible;
 	ino_t fInitedDirectory;
-		// -1LL means "no saved location". The authoritative directory-identity
-		// check is now kAttrPoseInfoDir (see BPoseView::ReadPoseInfo()); this
-		// field is just the within-session fallback.
+		// kUninitedDirectory means "no saved location". The authoritative
+		// directory-identity check is now kAttrPoseInfoDir (see
+		// BPoseView::ReadPoseInfo()); this field is just the within-session
+		// fallback.
 	BPoint fLocation;
 };
 
