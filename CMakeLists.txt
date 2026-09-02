@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
-project(VOS VERSION 0.6.1 LANGUAGES CXX C)
+project(VOS VERSION 0.6.2 LANGUAGES CXX C)
 
 #   ln -s generated.amd64/compile_commands.json compile_commands.json
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
