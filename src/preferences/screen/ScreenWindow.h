@@ -49,6 +49,7 @@ private:
 			void			_CheckColorMenu();
 			void			_CheckRefreshMenu();
 
+			void			_MarkReflectionItem(int32 reflection);
 			void			_UpdateActiveMode();
 			void			_UpdateActiveMode(int32 workspace);
 			void			_UpdateWorkspaceButtons();
@@ -92,6 +93,8 @@ private:
 			BMenuField*		fCombineField;
 			BPopUpMenu*		fRotationMenu;
 			BMenuField*		fRotationField;
+			BPopUpMenu*		fReflectionMenu;
+			BMenuField*		fReflectionField;
 			BPopUpMenu*		fSwapDisplaysMenu;
 			BMenuField*		fSwapDisplaysField;
 			BPopUpMenu*		fUseLaptopPanelMenu;
@@ -116,6 +119,7 @@ private:
 			uint32			fOriginalWorkspacesRows;
 			float			fOriginalBrightness;
 			int32			fOriginalRotation;
+			int32			fOriginalReflection;
 			bool			fModified;
 };
 

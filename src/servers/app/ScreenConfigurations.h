@@ -23,6 +23,7 @@ struct screen_configuration {
 	display_mode	mode;
 	float			brightness;
 	int32			rotation;
+	int32			reflection;
 	bool			has_info;
 	bool			is_current;
 };
@@ -44,6 +45,8 @@ public:
 			float				Brightness(int32 id);
 			void				SetRotation(int32 id, int32 rotation);
 			int32				Rotation(int32 id);
+			void				SetReflection(int32 id, int32 reflection);
+			int32				Reflection(int32 id);
 			void				Remove(screen_configuration* configuration);
 
 			status_t			Store(BMessage& settings) const;
@@ -51,6 +54,8 @@ public:
 
 private:
 	typedef BObjectList<screen_configuration, true> ConfigurationList;
+
+			screen_configuration* _FindByID(int32 id) const;
 
 			ConfigurationList	fConfigurations;
 };

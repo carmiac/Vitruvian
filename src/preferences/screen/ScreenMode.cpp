@@ -475,6 +475,38 @@ ScreenMode::Rotation() const
 }
 
 
+status_t
+ScreenMode::SetReflection(int32 reflection)
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return B_ERROR;
+
+	status_t status = screen->SetReflection(reflection);
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return status;
+}
+
+
+int32
+ScreenMode::Reflection() const
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return 0;
+
+	int32 reflection;
+	if (screen->GetReflection(&reflection) != B_OK)
+		reflection = 0;
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return reflection;
+}
+
+
 screen_mode
 ScreenMode::ModeAt(int32 index)
 {

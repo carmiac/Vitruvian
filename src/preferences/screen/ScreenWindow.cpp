@@ -48,6 +48,7 @@
 #include <Window.h>
 
 #include <InterfacePrivate.h>
+#include <PanelOrientationTransform.h>
 
 #include "AlertWindow.h"
 #include "Constants.h"
@@ -593,6 +594,33 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 		B_TRANSLATE("Rotation:"), fRotationMenu);
 	fRotationField->SetAlignment(B_ALIGN_RIGHT);
 
+	// Unlike kRotations, there is no "Auto" entry: reflection has no
+	// hardware-detected state, so the values are the plain menu order.
+	static const struct {
+		const char*	name;
+		int32		reflection;
+	} kReflections[] = {
+		{ B_TRANSLATE_MARK("None"), B_PANEL_REFLECTION_NONE },
+		{ B_TRANSLATE_MARK("Horizontal"), B_PANEL_REFLECTION_X },
+		{ B_TRANSLATE_MARK("Vertical"), B_PANEL_REFLECTION_Y },
+		{ B_TRANSLATE_MARK("Both"), B_PANEL_REFLECTION_BOTH }
+	};
+
+	fReflectionMenu = new BPopUpMenu("Reflection", true, true);
+	for (uint32 i = 0; i < B_COUNT_OF(kReflections); i++) {
+		BMessage* message = new BMessage(POP_REFLECTION_MSG);
+		message->AddInt32("reflection", kReflections[i].reflection);
+		fReflectionMenu->AddItem(new BMenuItem(
+			B_TRANSLATE_NOCOLLECT(kReflections[i].name), message));
+	}
+
+	fOriginalReflection = fScreenMode.Reflection();
+	_MarkReflectionItem(fOriginalReflection);
+
+	fReflectionField = new BMenuField("ReflectionMenu",
+		B_TRANSLATE("Reflection:"), fReflectionMenu);
+	fReflectionField->SetAlignment(B_ALIGN_RIGHT);
+
 	BLayoutBuilder::Group<>(outerControlsView)
 		.AddGrid(B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)
 			.Add(fResolutionField->CreateLabelLayoutItem(), 0, 0)
@@ -611,6 +639,8 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 			.Add(fTVStandardField->CreateMenuBarLayoutItem(), 1, 6)
 			.Add(fRotationField->CreateLabelLayoutItem(), 0, 7)
 			.Add(fRotationField->CreateMenuBarLayoutItem(), 1, 7)
+			.Add(fReflectionField->CreateLabelLayoutItem(), 0, 8)
+			.Add(fReflectionField->CreateMenuBarLayoutItem(), 1, 8)
 		.End();
 
 	// TODO: we don't support getting the screen's preferred settings
@@ -966,6 +996,23 @@ ScreenWindow::_UpdateControls()
 
 
 /*! Reflect active mode in chosen settings */
+// Matched on the message value, not the item index: reflection has no Auto
+// entry, so it carries none of rotation's index offset.
+void
+ScreenWindow::_MarkReflectionItem(int32 reflection)
+{
+	for (int32 i = 0; i < fReflectionMenu->CountItems(); i++) {
+		BMenuItem* item = fReflectionMenu->ItemAt(i);
+		int32 itemReflection;
+		if (item->Message()->FindInt32("reflection", &itemReflection) == B_OK
+			&& itemReflection == reflection) {
+			item->SetMarked(true);
+			return;
+		}
+	}
+}
+
+
 void
 ScreenWindow::_UpdateActiveMode()
 {
@@ -1193,6 +1240,28 @@ ScreenWindow::MessageReceived(BMessage* message)
 			break;
 		}
 
+		case POP_REFLECTION_MSG:
+		{
+			int32 reflection;
+			if (message->FindInt32("reflection", &reflection) != B_OK)
+				break;
+
+			// Applied at once rather than on Apply: reflection does not go
+			// through the mode list, so there is nothing to negotiate.
+			if (fScreenMode.SetReflection(reflection) != B_OK) {
+				BAlert* alert = new BAlert(B_TRANSLATE("Reflection"),
+					B_TRANSLATE("This graphics backend cannot reflect the "
+						"screen."),
+					B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
+					B_WARNING_ALERT);
+				alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+				alert->Go(NULL);
+
+				_MarkReflectionItem(fOriginalReflection);
+			}
+			break;
+		}
+
 		case POP_COMBINE_DISPLAYS_MSG:
 		{
 			// new combine mode has bee chosen
@@ -1274,6 +1343,9 @@ ScreenWindow::MessageReceived(BMessage* message)
 				= fRotationMenu->ItemAt(fOriginalRotation + 1);
 			if (rotationItem != NULL)
 				rotationItem->SetMarked(true);
+
+			fScreenMode.SetReflection(fOriginalReflection);
+			_MarkReflectionItem(fOriginalReflection);
 
 			_UpdateActiveMode();
 			break;

@@ -27,6 +27,20 @@ ScreenConfigurations::~ScreenConfigurations()
 
 
 screen_configuration*
+ScreenConfigurations::_FindByID(int32 id) const
+{
+	for (int32 i = fConfigurations.CountItems(); i-- > 0;) {
+		screen_configuration* configuration = fConfigurations.ItemAt(i);
+
+		if (configuration->id == id)
+			return configuration;
+	}
+
+	return NULL;
+}
+
+
+screen_configuration*
 ScreenConfigurations::CurrentByID(int32 id) const
 {
 	for (int32 i = fConfigurations.CountItems(); i-- > 0;) {
@@ -128,6 +142,8 @@ ScreenConfigurations::Set(int32 id, const monitor_info* info,
 		// POD with no constructor, and Set() does not touch either field.
 		configuration->brightness = 1.0f;
 		configuration->rotation = -1;
+		// Unlike rotation, reflection has no auto/hardware-detected state.
+		configuration->reflection = 0;
 
 		fConfigurations.AddItem(configuration);
 	}
@@ -151,27 +167,25 @@ ScreenConfigurations::Set(int32 id, const monitor_info* info,
 void
 ScreenConfigurations::SetBrightness(int32 id, float brightness)
 {
-	for (int32 i = fConfigurations.CountItems(); i-- > 0;) {
-		screen_configuration* configuration = fConfigurations.ItemAt(i);
+	screen_configuration* configuration = _FindByID(id);
+	if (configuration != NULL)
 		configuration->brightness = brightness;
-	}
 }
 
 
 void
 ScreenConfigurations::SetRotation(int32 id, int32 rotation)
 {
-	for (int32 i = fConfigurations.CountItems(); i-- > 0;) {
-		screen_configuration* configuration = fConfigurations.ItemAt(i);
+	screen_configuration* configuration = _FindByID(id);
+	if (configuration != NULL)
 		configuration->rotation = rotation;
-	}
 }
 
 
 int32
 ScreenConfigurations::Rotation(int32 id)
 {
-	screen_configuration* configuration = fConfigurations.ItemAt(0);
+	screen_configuration* configuration = _FindByID(id);
 
 	// -1 is "auto", i.e. whatever the backend detected.
 	if (configuration == NULL)
@@ -181,10 +195,32 @@ ScreenConfigurations::Rotation(int32 id)
 }
 
 
+void
+ScreenConfigurations::SetReflection(int32 id, int32 reflection)
+{
+	screen_configuration* configuration = _FindByID(id);
+	if (configuration != NULL)
+		configuration->reflection = reflection;
+}
+
+
+int32
+ScreenConfigurations::Reflection(int32 id)
+{
+	screen_configuration* configuration = _FindByID(id);
+
+	// No auto state, unlike Rotation(): B_PANEL_REFLECTION_NONE unless set.
+	if (configuration == NULL)
+		return 0;
+
+	return configuration->reflection;
+}
+
+
 float
 ScreenConfigurations::Brightness(int32 id)
 {
-	screen_configuration* configuration = fConfigurations.ItemAt(0);
+	screen_configuration* configuration = _FindByID(id);
 
 	if (configuration == NULL)
 		return -1;
@@ -236,6 +272,7 @@ ScreenConfigurations::Store(BMessage& settings) const
 			sizeof(display_mode));
 		screenSettings.AddFloat("brightness", configuration->brightness);
 		screenSettings.AddInt32("rotation", configuration->rotation);
+		screenSettings.AddInt32("reflection", configuration->reflection);
 
 		settings.AddMessage("screen", &screenSettings);
 	}
@@ -300,6 +337,8 @@ ScreenConfigurations::Restore(const BMessage& settings)
 			configuration->brightness = 1.0f;
 		if (stored.FindInt32("rotation", &configuration->rotation) != B_OK)
 			configuration->rotation = -1;
+		if (stored.FindInt32("reflection", &configuration->reflection) != B_OK)
+			configuration->reflection = 0;
 
 		fConfigurations.AddItem(configuration);
 	}

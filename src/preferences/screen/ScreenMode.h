@@ -71,6 +71,11 @@ public:
 			status_t			SetRotation(int32 rotation);
 			int32				Rotation() const;
 
+			// A screen property, not part of a mode: no mode carries
+			// reflection.
+			status_t			SetReflection(int32 reflection);
+			int32				Reflection() const;
+
 			screen_mode			ModeAt(int32 index);
 			const display_mode&	DisplayModeAt(int32 index);
 			int32				CountModes();
