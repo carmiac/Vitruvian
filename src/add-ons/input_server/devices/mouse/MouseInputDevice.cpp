@@ -1,6 +1,7 @@
 /*
  * Copyright 2004-2025, Haiku.
  * Copyright 2026, The Vitruvian Project
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the GPL License.
  *
  * Authors:
@@ -43,6 +44,7 @@
 #include <sys/epoll.h>
 #include <sys/stat.h>
 #include "LinuxEvdevShim.h"
+#include "PanelOrientationTransform.h"
 
 #include <libinput.h>
 
@@ -144,7 +146,8 @@ public:
 			status_t			UpdateSettings();
 			status_t			UpdateTouchpadSettings(const BMessage* message);
 
-			void				UpdateScreenBounds(BRect frame);
+			void				UpdateScreenBounds(BRect frame,
+									int32 orientation);
 
 			// Hardware name, distinct from fDeviceRef.name (the
 			// identity/settings key).
@@ -178,6 +181,16 @@ private:
 
 			// libinput event handling
 			void				_LibinputHandleEvent(struct libinput_event* ev);
+			// Normalizes, rotates by fOrientation and scales to screen.
+			void				_RotateDelta(float dx, float dy,
+									float& outDx, float& outDy) const
+								{
+									rotate_panel_delta(fOrientation,
+										dx, dy, outDx, outDy);
+								}
+
+			BPoint				_TouchPoint(
+									struct libinput_event_touch* tev) const;
 
 private:
 			MouseInputDevice&	fTarget;
@@ -223,6 +236,8 @@ private:
 			int32				fLastAbsX, fLastAbsY;
 			BPoint				fCursorPosition;
 			int32				fScreenW, fScreenH;
+			// DRM_MODE_PANEL_ORIENTATION_*, see PanelOrientationTransform.h
+			int32				fOrientation;
 
 			input_device_ref	fDeviceRef;
 			mouse_settings		fSettings;
@@ -296,6 +311,7 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fCursorPosition(0, 0),
 	fScreenW(1280),
 	fScreenH(800),
+	fOrientation(B_PANEL_ORIENTATION_NORMAL),
 	fDeviceRemapsButtons(false),
 	fSerial(atomic_add(&sNextMouseDeviceSerial, 1)),
 	fThread(-1),
@@ -572,10 +588,11 @@ MouseDevice::UpdateTouchpadSettings(const BMessage* message)
 
 
 void
-MouseDevice::UpdateScreenBounds(BRect frame)
+MouseDevice::UpdateScreenBounds(BRect frame, int32 orientation)
 {
 	fScreenW = (int32)(frame.Width() + 1);
 	fScreenH = (int32)(frame.Height() + 1);
+	fOrientation = orientation;
 
 	fCursorPosition.x = std::min(fCursorPosition.x, (float)(fScreenW - 1));
 	fCursorPosition.y = std::min(fCursorPosition.y, (float)(fScreenH - 1));
@@ -876,13 +893,15 @@ MouseDevice::_ControlThread()
 				// deflection lands one column past the right edge.
 				int32 spanX = fAbsMaxX - fAbsMinX;
 				int32 spanY = fAbsMaxY - fAbsMinY;
-				if (spanX > 0) {
-					fCursorPosition.x = (float)(currentAbsX - fAbsMinX)
-						* (fScreenW - 1) / spanX;
-				}
-				if (spanY > 0) {
-					fCursorPosition.y = (float)(currentAbsY - fAbsMinY)
-						* (fScreenH - 1) / spanY;
+				if (spanX > 0 && spanY > 0) {
+					// Normalize into physical panel space, rotate into
+					// logical (landscape) space, then scale.
+					float u = (float)(currentAbsX - fAbsMinX) / spanX;
+					float v = (float)(currentAbsY - fAbsMinY) / spanY;
+					float outU, outV;
+					rotate_panel_point(fOrientation, u, v, outU, outV);
+					fCursorPosition.x = outU * (fScreenW - 1);
+					fCursorPosition.y = outV * (fScreenH - 1);
 				}
 
 				fCursorPosition.x = std::max(0.0f,
@@ -913,6 +932,12 @@ MouseDevice::_ControlThread()
 				}
 
 				if (xdelta != 0 || ydelta != 0) {
+					float rx, ry;
+					_RotateDelta((float)xdelta,
+						(float)ydelta, rx, ry);
+					xdelta = (int32)rx;
+					ydelta = (int32)ry;
+
 					float histX = 0, histY = 0;
 					mouse_movement mv;
 					memset(&mv, 0, sizeof(mv));
@@ -990,11 +1015,15 @@ MouseDevice::_ControlThread()
 
 			// Scroll wheel
 			if (wheel_ydelta != 0 || wheel_xdelta != 0) {
+				float wx, wy;
+				_RotateDelta((float)wheel_xdelta,
+					(float)wheel_ydelta, wx, wy);
+
 				BMessage* message = new BMessage(B_MOUSE_WHEEL_CHANGED);
 				if (message != NULL) {
 					message->AddInt64("when", timestamp);
-					message->AddFloat("be:wheel_delta_x", wheel_xdelta);
-					message->AddFloat("be:wheel_delta_y", wheel_ydelta);
+					message->AddFloat("be:wheel_delta_x", wx);
+					message->AddFloat("be:wheel_delta_y", wy);
 					fTarget.EnqueueMessage(message);
 				}
 			}
@@ -1190,6 +1219,17 @@ MouseDevice::_RemapButtons(uint32 buttons) const
 // #pragma mark - libinput event handling
 
 
+BPoint
+MouseDevice::_TouchPoint(struct libinput_event_touch* tev) const
+{
+	float u = (float)libinput_event_touch_get_x_transformed(tev, 1);
+	float v = (float)libinput_event_touch_get_y_transformed(tev, 1);
+	float outU, outV;
+	rotate_panel_point(fOrientation, u, v, outU, outV);
+	return BPoint(outU * (fScreenW - 1), outV * (fScreenH - 1));
+}
+
+
 void
 MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 {
@@ -1202,8 +1242,11 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			double dx = libinput_event_pointer_get_dx(pev);
-			double dy = libinput_event_pointer_get_dy(pev);
+			double rawDx = libinput_event_pointer_get_dx(pev);
+			double rawDy = libinput_event_pointer_get_dy(pev);
+			float dx, dy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				dx, dy);
 
 			// Sync from shared slot before applying delta
 			if (fTarget.fCursorLock.Lock()) {
@@ -1211,8 +1254,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				fTarget.fCursorLock.Unlock();
 			}
 
-			fLibinputLastPos.x += (float)dx;
-			fLibinputLastPos.y += (float)dy;
+			fLibinputLastPos.x += dx;
+			fLibinputLastPos.y += dy;
 			fLibinputLastPos.x = std::max(0.0f,
 				std::min((float)(fScreenW - 1), fLibinputLastPos.x));
 			fLibinputLastPos.y = std::max(0.0f,
@@ -1239,14 +1282,17 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			// Use current screen size (read once at thread start)
-			double x = libinput_event_pointer_get_absolute_x_transformed(
-				pev, fScreenW);
-			double y = libinput_event_pointer_get_absolute_y_transformed(
-				pev, fScreenH);
+			// Normalize into physical panel space (width=1, height=1),
+			// rotate into logical space, then scale to the screen.
+			double u = libinput_event_pointer_get_absolute_x_transformed(
+				pev, 1);
+			double v = libinput_event_pointer_get_absolute_y_transformed(
+				pev, 1);
+			float outU, outV;
+			rotate_panel_point(fOrientation, (float)u, (float)v, outU, outV);
 
-			fLibinputLastPos.x = (float)x;
-			fLibinputLastPos.y = (float)y;
+			fLibinputLastPos.x = outU * fScreenW;
+			fLibinputLastPos.y = outV * fScreenH;
 
 			// Sync shared cursor position
 			if (fTarget.fCursorLock.Lock()) {
@@ -1323,9 +1369,12 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
 			double rawDy = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+			float scrollDx, scrollDy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				scrollDx, scrollDy);
 
-			fLibinputScrollAccX += rawDx;
-			fLibinputScrollAccY += rawDy;
+			fLibinputScrollAccX += scrollDx;
+			fLibinputScrollAccY += scrollDy;
 
 			const float kStepSize = 1.0f;
 			int32 stepsX = 0, stepsY = 0;
@@ -1366,13 +1415,16 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			double dx = libinput_event_pointer_get_scroll_value(pev,
+			double rawDx = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
-			double dy = libinput_event_pointer_get_scroll_value(pev,
+			double rawDy = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+			float scrollDx, scrollDy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				scrollDx, scrollDy);
 
-			fLibinputScrollAccX += dx;
-			fLibinputScrollAccY += dy;
+			fLibinputScrollAccX += scrollDx;
+			fLibinputScrollAccY += scrollDy;
 
 			const float kStepSize = 1.0f;
 			int32 stepsX = 0, stepsY = 0;
@@ -1419,10 +1471,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			// Slot 1 = second finger: track for two-finger scroll
 			if (slot == 1) {
 				if (type == LIBINPUT_EVENT_TOUCH_DOWN) {
-					float sx = (float)libinput_event_touch_get_x_transformed(
-						tev, fScreenW);
-					float sy = (float)libinput_event_touch_get_y_transformed(
-						tev, fScreenH);
+					BPoint p = _TouchPoint(tev);
+					float sx = p.x, sy = p.y;
 					fLibinputTouchSlot1Active = true;
 					fLibinputTouchSlot1LastX  = sx;
 					fLibinputTouchSlot1LastY  = sy;
@@ -1434,10 +1484,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 					fLibinputTouchScrollAccY  = 0;
 				} else if (type == LIBINPUT_EVENT_TOUCH_MOTION
 					&& fLibinputTouchSlot1Active) {
-					float sx = (float)libinput_event_touch_get_x_transformed(
-						tev, fScreenW);
-					float sy = (float)libinput_event_touch_get_y_transformed(
-						tev, fScreenH);
+					BPoint p = _TouchPoint(tev);
+					float sx = p.x, sy = p.y;
 					float dx = sx - fLibinputTouchSlot1LastX;
 					float dy = sy - fLibinputTouchSlot1LastY;
 					fLibinputTouchSlot1LastX = sx;
@@ -1484,12 +1532,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				break;
 
 			if (type == LIBINPUT_EVENT_TOUCH_DOWN) {
-				float sx = (float)libinput_event_touch_get_x_transformed(
-					tev, fScreenW);
-				float sy = (float)libinput_event_touch_get_y_transformed(
-					tev, fScreenH);
-				fLibinputLastPos.x = sx;
-				fLibinputLastPos.y = sy;
+				fLibinputLastPos = _TouchPoint(tev);
 
 				if (fTarget.fCursorLock.Lock()) {
 					fTarget.fCursorPosition = fLibinputLastPos;
@@ -1529,12 +1572,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				if (fLibinputTouchSlot1Active)
 					break;
 
-				float sx = (float)libinput_event_touch_get_x_transformed(
-					tev, fScreenW);
-				float sy = (float)libinput_event_touch_get_y_transformed(
-					tev, fScreenH);
-				fLibinputLastPos.x = sx;
-				fLibinputLastPos.y = sy;
+				fLibinputLastPos = _TouchPoint(tev);
 
 				if (fTarget.fCursorLock.Lock()) {
 					fTarget.fCursorPosition = fLibinputLastPos;
@@ -1697,6 +1735,10 @@ MouseInputDevice::_UpdateScreenBounds(MouseDevice* device, BMessage* message)
 		|| message->FindRect("screen_bounds", &frame) != B_OK)
 		return B_BAD_VALUE;
 
+	// Absent on older app_server builds; normal orientation either way.
+	int32 orientation = B_PANEL_ORIENTATION_NORMAL;
+	message->FindInt32("screen_orientation", &orientation);
+
 	// Rescale only the first time this frame is seen (once per device call).
 	if (fCursorLock.Lock()) {
 		if (frame != fScreenFrame && fScreenFrame.IsValid()
@@ -1707,10 +1749,11 @@ MouseInputDevice::_UpdateScreenBounds(MouseDevice* device, BMessage* message)
 				/ fScreenFrame.Height();
 		}
 		fScreenFrame = frame;
+		fOrientation = orientation;
 		fCursorLock.Unlock();
 	}
 
-	device->UpdateScreenBounds(frame);
+	device->UpdateScreenBounds(frame, orientation);
 	return B_OK;
 }
 

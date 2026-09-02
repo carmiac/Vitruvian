@@ -151,6 +151,7 @@ InputServer::InputServer()
 	fMouseSettings(),
 	fChars(NULL),
 	fScreen(B_MAIN_SCREEN_ID),
+	fScreenOrientation(0),
 	fEventQueueLock("input server event queue"),
 	fReplicantMessenger(NULL),
 	fInputMethodWindow(NULL),
@@ -560,16 +561,22 @@ InputServer::MessageReceived(BMessage* message)
 			if (message->FindRect("screen_bounds", &frame) != B_OK)
 				frame = fScreen.Frame();
 
-			if (frame == fFrame)
+			int32 orientation;
+			if (message->FindInt32("screen_orientation", &orientation) != B_OK)
+				orientation = 0;
+
+			if (frame == fFrame && orientation == fScreenOrientation)
 				break;
 
 			BPoint pos(fMousePos.x * frame.Width() / fFrame.Width(),
 				fMousePos.y * frame.Height() / fFrame.Height());
 			fFrame = frame;
+			fScreenOrientation = orientation;
 
 			// Devices place the cursor against their own copy of screen size.
 			BMessage bounds;
 			bounds.AddRect("screen_bounds", frame);
+			bounds.AddInt32("screen_orientation", orientation);
 			ControlDevices(NULL, B_POINTING_DEVICE,
 				B_SCREEN_BOUNDS_CHANGED, &bounds);
 

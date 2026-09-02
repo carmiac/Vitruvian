@@ -1,6 +1,7 @@
 /*
  * Copyright 2004-2025, Haiku.
  * Copyright 2026, The Vitruvian Project
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the GPL License.
  *
  * Authors:
@@ -72,6 +73,7 @@ public:
 			// and clicks across two (e.g. VirtualBox's integration device).
 			uint32			fButtons;
 			BRect			fScreenFrame;
+			int32			fOrientation;
 };
 
 extern "C" BInputServerDevice* instantiate_input_device();
