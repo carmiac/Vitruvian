@@ -140,10 +140,13 @@ enum {
 	kInsertAfter
 };
 
-const BPoint kTransparentDragThreshold(be_control_look->ComposeIconSize(256).Width(),
-	be_control_look->ComposeIconSize(192).Width());
+const BPoint kTransparentDragThreshold(
+	be_control_look->ComposeIconSize(512).Width(),
+	be_control_look->ComposeIconSize(384).Width());
 	// maximum size of the transparent drag bitmap, use a drag rect
-	// if larger in any direction
+	// if larger in any direction. Haiku uses 256x192, which a selection of
+	// four icons across already overflows, so the drag image loses its
+	// outer icons to the edge fade while the drop still carries them.
 
 struct attr_column_relation {
 	uint32	attrHash;
