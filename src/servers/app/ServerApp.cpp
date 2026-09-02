@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2016, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -518,6 +519,13 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 				&& (!stream->IsValid() || !gInputManager->AddStream(stream))) {
 				delete stream;
 				break;
+			}
+
+			// A fresh input_server otherwise only learns the screen
+			// bounds and panel orientation on the next mode change.
+			if (stream != NULL) {
+				stream->UpdateScreenBounds(fDesktop->VirtualScreen().Frame(),
+					fDesktop->HWInterface()->PanelOrientation());
 			}
 
 			// TODO: this should be done using notifications (so that an
@@ -3370,6 +3378,35 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			uint32 capabilities = fDesktop->HWInterface()->DPMSCapabilities();
 			fLink.StartMessage(B_OK);
 			fLink.Attach<uint32>(capabilities);
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_SET_ROTATION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_SET_ROTATION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			int32 rotation;
+			link.Read<int32>(&rotation);
+
+			status_t status = fDesktop->SetRotation(id, rotation);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_ROTATION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_ROTATION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			fLink.StartMessage(B_OK);
+			fLink.Attach<int32>(fDesktop->Rotation(id));
+
 			fLink.Flush();
 			break;
 		}
