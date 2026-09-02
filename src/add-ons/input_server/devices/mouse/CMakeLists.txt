@@ -16,4 +16,4 @@ AddOn(
 	${LIBINPUT_INCLUDE_DIRS}
 )
 
-UsePrivateHeaders(keyboard input interface)
+UsePrivateHeaders(mouse input interface)
