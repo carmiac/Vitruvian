@@ -2090,7 +2090,7 @@ BPoseView::CreatePoses(Model** models, PoseInfo* poseInfoArray, int32 count,
 			resultingPoses[modelIndex] = pose;
 
 		// set location from poseinfo if saved loc was for this dir
-		if (poseInfo->fInitedDirectory != -1LL) {
+		if (poseInfo->fInitedDirectory != kUninitedDirectory) {
 			PinPointToValidRange(poseInfo->fLocation);
 			pose->SetLocation(poseInfo->fLocation, this);
 			AddToVSList(pose);
@@ -2114,7 +2114,8 @@ BPoseView::CreatePoses(Model** models, PoseInfo* poseInfoArray, int32 count,
 
 			case kIconMode:
 			case kMiniIconMode:
-				if (poseInfo->fInitedDirectory == -1LL || fAlwaysAutoPlace) {
+				if (poseInfo->fInitedDirectory == kUninitedDirectory
+					|| fAlwaysAutoPlace) {
 					if (pose->HasLocation())
 						RemoveFromVSList(pose);
 
@@ -3156,7 +3157,7 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 			poseInfo->fInitedDirectory = -1LL;
 	}
 
-	if (poseInfo->fInitedDirectory != -1LL
+	if (poseInfo->fInitedDirectory != kUninitedDirectory
 		&& (poseInfo->fLocation.x < -kSanePoseLocation
 			|| poseInfo->fLocation.x > kSanePoseLocation
 			|| poseInfo->fLocation.y < -kSanePoseLocation
