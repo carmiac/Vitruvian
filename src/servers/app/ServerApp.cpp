@@ -525,7 +525,8 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			// bounds and panel orientation on the next mode change.
 			if (stream != NULL) {
 				stream->UpdateScreenBounds(fDesktop->VirtualScreen().Frame(),
-					fDesktop->HWInterface()->PanelOrientation());
+					fDesktop->HWInterface()->PanelOrientation(),
+					fDesktop->HWInterface()->PanelReflection());
 			}
 
 			// TODO: this should be done using notifications (so that an
@@ -3406,6 +3407,35 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 
 			fLink.StartMessage(B_OK);
 			fLink.Attach<int32>(fDesktop->Rotation(id));
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_SET_REFLECTION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_SET_REFLECTION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			int32 reflection;
+			link.Read<int32>(&reflection);
+
+			status_t status = fDesktop->SetReflection(id, reflection);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_REFLECTION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_REFLECTION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			fLink.StartMessage(B_OK);
+			fLink.Attach<int32>(fDesktop->Reflection(id));
 
 			fLink.Flush();
 			break;

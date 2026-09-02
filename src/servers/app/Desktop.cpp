@@ -534,6 +534,15 @@ Desktop::Init()
 		gScreenManager->Unlock();
 	}
 
+	// No auto state for reflection, unlike rotation above, so apply
+	// unconditionally rather than guarding on >= 0.
+	int32 reflection = fWorkspaces[0].StoredScreenConfiguration().Reflection(0);
+	gScreenManager->Lock();
+	Screen* reflected = gScreenManager->ScreenAt(0);
+	if (reflected != NULL)
+		reflected->HWInterface()->SetPanelReflection(reflection);
+	gScreenManager->Unlock();
+
 	status_t status = fVirtualScreen.SetConfiguration(*this,
 		fWorkspaces[0].CurrentScreenConfiguration());
 	if (status != B_OK) {
@@ -619,7 +628,7 @@ Desktop::Init()
 	// _ScreenChanged() normally does this, but nothing calls it at cold
 	// boot, only on later mode changes.
 	gInputManager->UpdateScreenBounds(fVirtualScreen.Frame(),
-		HWInterface()->PanelOrientation());
+		HWInterface()->PanelOrientation(), HWInterface()->PanelReflection());
 
 	BRegion stillAvailableOnScreen;
 	_RebuildClippingForAllWindows(stillAvailableOnScreen);
@@ -1018,6 +1027,37 @@ int32
 Desktop::Rotation(int32 id) const
 {
 	return HWInterface()->PanelOrientation();
+}
+
+
+status_t
+Desktop::SetReflection(int32 id, int32 reflection)
+{
+	// Not locked: HWInterface notifies listeners synchronously and
+	// Desktop::ScreenChanged() takes the window lock for writing.
+	status_t result = HWInterface()->SetPanelReflection(reflection);
+
+	if (result == B_OK) {
+		ScreenConfigurations& stored
+			= fWorkspaces[0].StoredScreenConfiguration();
+		if (stored.CurrentByID(id) == NULL) {
+			screen_configuration* current
+				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+			stored.Set(id, current->has_info ? &current->info : NULL,
+				current->frame, current->mode);
+		}
+		stored.SetReflection(id, reflection);
+		StoreWorkspaceConfiguration(0);
+	}
+
+	return result;
+}
+
+
+int32
+Desktop::Reflection(int32 id) const
+{
+	return HWInterface()->PanelReflection();
 }
 
 
@@ -3680,7 +3720,8 @@ Desktop::_ScreenChanged(Screen* screen)
 	// update our cached screen region
 	fScreenRegion.Set(screen->Frame());
 	gInputManager->UpdateScreenBounds(screen->Frame(),
-		screen->HWInterface()->PanelOrientation());
+		screen->HWInterface()->PanelOrientation(),
+		screen->HWInterface()->PanelReflection());
 
 	BRegion background;
 	_RebuildClippingForAllWindows(background);

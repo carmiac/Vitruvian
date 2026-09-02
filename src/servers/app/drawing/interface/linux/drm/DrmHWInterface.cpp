@@ -7,6 +7,7 @@
 
 #include "DrmBuffer.h"
 #include "LibEvdevEventStream.h"
+#include "PanelOrientationTransform.h"
 
 #include <algorithm>
 #include <new>
@@ -89,7 +90,8 @@ DrmHWInterface::DrmHWInterface()
 	fConnProps{},
 	fVRRSupported(false),
 	fVRREnabled(false),
-	fPanelOrientation(PANEL_ORIENTATION_NORMAL)
+	fPanelOrientation(PANEL_ORIENTATION_NORMAL),
+	fPanelReflection(B_PANEL_REFLECTION_NONE)
 {
 	pthread_mutex_init(&fDirtyMutex, NULL);
 
@@ -209,6 +211,7 @@ DrmHWInterface::_OnSessionEnable()
 	// allocated at logical (post-swap) dimensions, not the panel's physical
 	// mode.
 	_DiscoverPanelOrientation();
+	_DiscoverPanelReflection();
 
 	// Save current CRTC state for restoration on exit
 	struct modeset_dev *iter;
@@ -688,7 +691,7 @@ DrmHWInterface::CreateEventStream()
 	uint32 w = fDisplayMode.virtual_width  > 0 ? fDisplayMode.virtual_width  : 1920;
 	uint32 h = fDisplayMode.virtual_height > 0 ? fDisplayMode.virtual_height : 1080;
 	LibEvdevEventStream* s = new (std::nothrow) LibEvdevEventStream(w, h,
-		fSeat, fPanelOrientation);
+		fSeat, fPanelOrientation, fPanelReflection);
 	if (s == NULL)
 		return NULL;
 	if (!s->IsValid()) {
@@ -1338,33 +1341,42 @@ DrmHWInterface::IsDoubleBuffered() const
 
 namespace {
 
-// The one place the rotation direction convention lives. Logical (lx, ly)
-// is a pixel index into a logicalW x logicalH buffer; the result is the
-// corresponding pixel index into the (swapped, for 90/270) physical buffer.
-// Cross-checked against libweston/backend-drm (modes.c's
+// The one place the rotation and reflection direction convention lives.
+// Logical (lx, ly) is a pixel index into a logicalW x logicalH buffer; the
+// result is the corresponding pixel index into the (swapped, for 90/270)
+// physical buffer. Cross-checked against libweston/backend-drm (modes.c's
 // get_panel_orientation() + shared/matrix.c's weston_matrix_init_transform()):
 // LEFT_UP is a 90 degree CCW content rotation, RIGHT_UP a 270 degree CCW
 // (= 90 CW) rotation. If this ships mirrored, flip the two cases below.
+// Reflection is a pre-step in logical space, applied before rotation, with
+// no dimension swap; composition order matches weston_matrix_init_transform's
+// Sc . T3 . R . T2 . S . T1 (flip S runs before rotate R).
 inline void
 rotate_point(PanelOrientation orientation, int32 lx, int32 ly,
-	int32 logicalW, int32 logicalH, int32& px, int32& py)
+	int32 logicalW, int32 logicalH, int32& px, int32& py,
+	int32 reflection = B_PANEL_REFLECTION_NONE)
 {
+	int32 rx = (reflection & B_PANEL_REFLECTION_X) != 0
+		? logicalW - 1 - lx : lx;
+	int32 ry = (reflection & B_PANEL_REFLECTION_Y) != 0
+		? logicalH - 1 - ly : ly;
+
 	switch (orientation) {
 		case PANEL_ORIENTATION_UPSIDE_DOWN:
-			px = logicalW - 1 - lx;
-			py = logicalH - 1 - ly;
+			px = logicalW - 1 - rx;
+			py = logicalH - 1 - ry;
 			break;
 		case PANEL_ORIENTATION_LEFT_UP:
-			px = ly;
-			py = logicalW - 1 - lx;
+			px = ry;
+			py = logicalW - 1 - rx;
 			break;
 		case PANEL_ORIENTATION_RIGHT_UP:
-			px = logicalH - 1 - ly;
-			py = lx;
+			px = logicalH - 1 - ry;
+			py = rx;
 			break;
 		default:
-			px = lx;
-			py = ly;
+			px = rx;
+			py = ry;
 			break;
 	}
 }
@@ -1392,8 +1404,9 @@ DrmHWInterface::_BlitRect(RenderingBuffer* src, RenderingBuffer* dst,
 	uint8* srcBase = (uint8*)src->Bits();
 	uint8* dstBase = (uint8*)dst->Bits();
 
-	if (fPanelOrientation == PANEL_ORIENTATION_LEFT_UP
-			|| fPanelOrientation == PANEL_ORIENTATION_RIGHT_UP) {
+	if (fPanelReflection == B_PANEL_REFLECTION_NONE
+			&& (fPanelOrientation == PANEL_ORIENTATION_LEFT_UP
+				|| fPanelOrientation == PANEL_ORIENTATION_RIGHT_UP)) {
 		// Axis-swapped: no long contiguous run on both sides at once, so
 		// AVX2 streaming stores don't apply here. Scalar per-pixel.
 		if ((int32)dst->Width() != srcH || (int32)dst->Height() != srcW)
@@ -1409,7 +1422,8 @@ DrmHWInterface::_BlitRect(RenderingBuffer* src, RenderingBuffer* dst,
 		return;
 	}
 
-	if (fPanelOrientation == PANEL_ORIENTATION_UPSIDE_DOWN) {
+	if (fPanelReflection == B_PANEL_REFLECTION_NONE
+			&& fPanelOrientation == PANEL_ORIENTATION_UPSIDE_DOWN) {
 		// No axis swap for 180, so each row stays contiguous and only
 		// runs backwards. rotate_point() still places its start, to keep
 		// the direction convention in one place.
@@ -1422,6 +1436,30 @@ DrmHWInterface::_BlitRect(RenderingBuffer* src, RenderingBuffer* dst,
 			uint8* drow = dstBase + dy * dstBpr + dx * 4;
 			for (int32 sx = 0; sx < w; sx++, srow += 4, drow -= 4)
 				memcpy(drow, srow, 4);
+		}
+		return;
+	}
+
+	if (fPanelReflection != B_PANEL_REFLECTION_NONE) {
+		// Reflected (with or without rotation): neither fast path above
+		// applies once a flip is involved, since a flipped row is neither
+		// a straight run nor a simple reversed run. Per-pixel via the same
+		// rotate_point() convention, axis-swapped like the LEFT_UP/RIGHT_UP
+		// fast path above whenever the orientation itself swaps axes.
+		bool swapped = fPanelOrientation == PANEL_ORIENTATION_LEFT_UP
+			|| fPanelOrientation == PANEL_ORIENTATION_RIGHT_UP;
+		int32 expectW = swapped ? srcH : srcW;
+		int32 expectH = swapped ? srcW : srcH;
+		if ((int32)dst->Width() != expectW || (int32)dst->Height() != expectH)
+			return;
+		for (int32 sy = y; sy < y + h; sy++) {
+			const uint8* srow = srcBase + sy * srcBpr + x * 4;
+			for (int32 sx = x; sx < x + w; sx++, srow += 4) {
+				int32 px, py;
+				rotate_point(fPanelOrientation, sx, sy, srcW, srcH, px, py,
+					fPanelReflection);
+				memcpy(dstBase + py * dstBpr + px * 4, srow, 4);
+			}
 		}
 		return;
 	}
@@ -1482,7 +1520,8 @@ DrmHWInterface::_BlendCursor(RenderingBuffer* srcBg, RenderingBuffer* dst,
 	IntRect area) const
 {
 	if (srcBg == NULL || dst == NULL || !area.IsValid()
-			|| fCursorAndDragBitmap == NULL || !fCursorVisible)
+			|| fCursorAndDragBitmap == NULL
+			|| fCursorAndDragBitmap->Bits() == NULL || !fCursorVisible)
 		return;
 
 	IntRect cf = _CursorFrame();
@@ -1512,7 +1551,8 @@ DrmHWInterface::_BlendCursor(RenderingBuffer* srcBg, RenderingBuffer* dst,
 	crs += (top - (int32)floorf(cf.top))   * crsBPR
 		 + (left - (int32)floorf(cf.left)) * 4;
 
-	if (fPanelOrientation == PANEL_ORIENTATION_NORMAL) {
+	if (fPanelOrientation == PANEL_ORIENTATION_NORMAL
+			&& fPanelReflection == B_PANEL_REFLECTION_NONE) {
 		for (int32 y = top; y <= bottom; y++) {
 			uint8* s = bg;
 			uint8* d = dpx;
@@ -1540,7 +1580,7 @@ DrmHWInterface::_BlendCursor(RenderingBuffer* srcBg, RenderingBuffer* dst,
 		for (int32 x = left; x <= right; x++) {
 			int32 px, py;
 			rotate_point(fPanelOrientation, x, y, logicalW, logicalH,
-				px, py);
+				px, py, fPanelReflection);
 			uint8* d = dstBase + py * dBPR + px * 4;
 			int a = 255 - c[3];
 			d[0] = (uint8)(((s[0] * a + 255) >> 8) + c[0]);
@@ -1699,14 +1739,37 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 		return;
 	}
 
-	if (!_HardwareCursorUsable()) {
+	// A cursor bigger than the BO (large-font UI scaling; the amdgpu
+	// cursor plane itself goes up to 256x256, but our allocation is
+	// fixed at 64x64, see modeset_create_cursor_fb()) cannot be cropped
+	// into the sprite without silently chopping it, so it is declined
+	// the same way an unusable plane is: fall back to software.
+	const int32 cw = (int32)cursor->Bounds().IntegerWidth() + 1;
+	const int32 ch = (int32)cursor->Bounds().IntegerHeight() + 1;
+	const bool oversized = cw > (int32)dev->cursor_w
+		|| ch > (int32)dev->cursor_h;
+
+	if (!_HardwareCursorUsable() || oversized) {
+		if (oversized) {
+			static bool sSaidOversized = false;
+			if (!sSaidOversized) {
+				fprintf(stderr, "DRM: cursor %" B_PRId32 "x%" B_PRId32
+					" exceeds %ux%u hardware sprite, using software "
+					"cursor\n", cw, ch, dev->cursor_w, dev->cursor_h);
+				sSaidOversized = true;
+			}
+		}
 		// Arm a fully transparent sprite instead of a null one: on a
 		// virtualized host that was showing our sprite as its own window
 		// pointer, disabling it outright makes the host draw its default
 		// pointer on top of the one _BlendCursor() draws.
 		if (dev->cursor_handle != 0) {
-			fprintf(stderr, "DRM: cursor to software (orientation %d), "
-				"sprite armed transparent\n", (int)fPanelOrientation);
+			static bool sSaidSoftware = false;
+			if (!sSaidSoftware) {
+				fprintf(stderr, "DRM: cursor drawn in software, sprite "
+					"armed transparent\n");
+				sSaidSoftware = true;
+			}
 			memset(dev->cursor_map, 0, dev->cursor_size);
 			drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
 				dev->cursor_w, dev->cursor_h);
@@ -1719,9 +1782,6 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 
 	memset(dev->cursor_map, 0, dev->cursor_size);
 
-	int32 cw = std::min((int32)cursor->Bounds().IntegerWidth() + 1, 64);
-	int32 ch = std::min((int32)cursor->Bounds().IntegerHeight() + 1, 64);
-
 	// An empty or bogus bitmap would leave the sprite armed but fully
 	// transparent, which looks exactly like a cursor the host refuses to
 	// draw: it still tracks the pointer, invisibly.
@@ -1729,11 +1789,17 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 		fprintf(stderr, "DRM: cursor bitmap unusable (%" B_PRId32 "x%"
 			B_PRId32 ", bits=%p), leaving sprite armed transparent\n",
 			cw, ch, cursor->Bits());
+		// The memset above already blanked the sprite. Returning is not
+		// optional: the upload below would memcpy from a NULL source.
+		fHardwareCursorEnabled = false;
+		return;
 	}
 	const uint8* src = (const uint8*)cursor->Bits();
 	uint8* dst = dev->cursor_map;
+	const uint32 dstStride = dev->cursor_w * 4;
 	for (int32 row = 0; row < ch; row++) {
-		memcpy(dst + row * 256, src + row * cursor->BytesPerRow(), cw * 4);
+		memcpy(dst + row * dstStride, src + row * cursor->BytesPerRow(),
+			cw * 4);
 	}
 
 	const BPoint hot = cursor->GetHotSpot();
@@ -1743,10 +1809,10 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 	int ret;
 	if (fCursorUsesAtomic) {
 		ret = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
-			px, py, 64, 64) == B_OK) ? 0 : -1;
+			px, py, dev->cursor_w, dev->cursor_h) == B_OK) ? 0 : -1;
 	} else {
 		ret = drmModeSetCursor2(fFd, dev->crtc,
-			dev->cursor_handle, 64, 64,
+			dev->cursor_handle, dev->cursor_w, dev->cursor_h,
 			(int32)hot.x, (int32)hot.y);
 		if (ret == 0)
 			drmModeMoveCursor(fFd, dev->crtc, px, py);
@@ -1773,13 +1839,8 @@ DrmHWInterface::SetCursorVisible(bool visible)
 	// fHardwareCursorEnabled, not just dev->cursor_ok: SetCursor() may
 	// have left a stale "ok" sprite armed-but-transparent for a rotated
 	// orientation, and this must not re-show it.
-	if (!dev || !dev->cursor_ok || !fHardwareCursorEnabled) {
-		if (dev != NULL && visible && !fHardwareCursorEnabled) {
-			fprintf(stderr, "DRM: SetCursorVisible(true) ignored, hardware "
-				"cursor is off\n");
-		}
+	if (!dev || !dev->cursor_ok || !fHardwareCursorEnabled)
 		return;
-	}
 
 	if (!visible) {
 		_DisableHardwareCursor();
@@ -2270,26 +2331,22 @@ DrmHWInterface::_DiscoverPanelOrientation()
 	}
 
 	const char* value = getenv("VOS_PANEL_ORIENTATION");
-	if (value == NULL || value[0] == '\0')
-		return;
-
-	if (strcmp(value, "normal") == 0 || strcmp(value, "0") == 0)
-		fPanelOrientation = PANEL_ORIENTATION_NORMAL;
-	else if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
-		fPanelOrientation = PANEL_ORIENTATION_UPSIDE_DOWN;
-	else if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
-		fPanelOrientation = PANEL_ORIENTATION_LEFT_UP;
-	else if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
-		fPanelOrientation = PANEL_ORIENTATION_RIGHT_UP;
-	else {
-		fprintf(stderr, "DrmHWInterface: unrecognized VOS_PANEL_ORIENTATION "
-			"'%s' (want normal|upside-down|left-up|right-up or 0-3), "
-			"ignoring\n", value);
-		return;
+	int32 override = fPanelOrientation;
+	switch (parse_panel_orientation(value, override)) {
+		case B_PANEL_ENV_INVALID:
+			fprintf(stderr, "DrmHWInterface: unrecognized "
+				"VOS_PANEL_ORIENTATION '%s' (want "
+				"normal|upside-down|left-up|right-up or 0-3), ignoring\n",
+				value);
+			break;
+		case B_PANEL_ENV_SET:
+			fPanelOrientation = (enum PanelOrientation)override;
+			fprintf(stderr, "DrmHWInterface: panel orientation overridden "
+				"to '%s' via VOS_PANEL_ORIENTATION\n", value);
+			break;
+		case B_PANEL_ENV_UNSET:
+			break;
 	}
-
-	fprintf(stderr, "DrmHWInterface: panel orientation overridden to "
-		"'%s' via VOS_PANEL_ORIENTATION\n", value);
 }
 
 
@@ -2343,6 +2400,56 @@ DrmHWInterface::SetPanelOrientation(int32 orientation)
 }
 
 
+// No kernel or DMI source for reflection (unlike orientation): mirrored
+// panels aren't a hardware fact to discover, so VOS_PANEL_REFLECTION is the
+// only source, purely for testing without a rebuild.
+void
+DrmHWInterface::_DiscoverPanelReflection()
+{
+	fPanelReflection = B_PANEL_REFLECTION_NONE;
+
+	const char* value = getenv("VOS_PANEL_REFLECTION");
+	switch (parse_panel_reflection(value, fPanelReflection)) {
+		case B_PANEL_ENV_INVALID:
+			fprintf(stderr, "DrmHWInterface: unrecognized "
+				"VOS_PANEL_REFLECTION '%s' (want none|x|y|both or 0-3), "
+				"ignoring\n", value);
+			break;
+		case B_PANEL_ENV_SET:
+			fprintf(stderr, "DrmHWInterface: panel reflection overridden "
+				"to '%s' via VOS_PANEL_REFLECTION\n", value);
+			break;
+		case B_PANEL_ENV_UNSET:
+			break;
+	}
+}
+
+
+int32
+DrmHWInterface::PanelReflection() const
+{
+	return fPanelReflection;
+}
+
+
+// Unlike SetPanelOrientation(), never calls SetMode(): a flip never changes
+// logical width/height, so a bare _NotifyScreenChanged() suffices. Also
+// unlike orientation, there is no auto (-1) fallback state for reflection.
+status_t
+DrmHWInterface::SetPanelReflection(int32 reflection)
+{
+	if (reflection < 0 || reflection > B_PANEL_REFLECTION_BOTH)
+		return B_BAD_VALUE;
+
+	if (reflection == fPanelReflection)
+		return B_OK;
+
+	fPanelReflection = reflection;
+	_NotifyScreenChanged();
+	return B_OK;
+}
+
+
 // dev->width/height (physical scanout) <-> fDisplayMode.virtual_width/height
 // (logical desktop) differ by an axis swap whenever the panel is mounted
 // sideways. The swap is its own inverse, so one function covers both
@@ -2362,12 +2469,13 @@ DrmHWInterface::_ApplyOrientationSwap(uint32_t w, uint32_t h,
 }
 
 
-// Rotated would need a pre-rotated sprite, which we deliberately do not
-// produce; a cursor plane advertising DRM rotation would relax that, the way
-// Weston's drm_rotation_from_output_transform() does. Without a cursor plane
-// the legacy ioctl still works, but the sprite is then serviced by a plane we
-// cannot see and a virtualized host may draw or hide it as its own pointer,
-// so Weston declines it too (backend-drm/kms.c, "if (!plane) return").
+// Rotated or reflected would need a pre-transformed sprite, which we
+// deliberately do not produce; a cursor plane advertising DRM rotation
+// would relax that, the way Weston's drm_rotation_from_output_transform()
+// does. Without a cursor plane the legacy ioctl still works, but the sprite
+// is then serviced by a plane we cannot see and a virtualized host may draw
+// or hide it as its own pointer, so Weston declines it too (backend-drm/
+// kms.c, "if (!plane) return").
 bool
 DrmHWInterface::_HardwareCursorUsable() const
 {
@@ -2375,6 +2483,7 @@ DrmHWInterface::_HardwareCursorUsable() const
 	static bool sForceHwCursor = sForceHw != NULL && sForceHw[0] != '\0';
 
 	return fPanelOrientation == PANEL_ORIENTATION_NORMAL
+		&& fPanelReflection == B_PANEL_REFLECTION_NONE
 		&& (fCursorPlaneId != 0 || sForceHwCursor);
 }
 

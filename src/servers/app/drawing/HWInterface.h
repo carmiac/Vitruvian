@@ -103,6 +103,11 @@ public:
 	virtual	status_t			SetPanelOrientation(int32)
 									{ return B_UNSUPPORTED; }
 
+	// B_PANEL_REFLECTION_*; NONE unless overridden. No auto-detected state.
+	virtual	int32				PanelReflection() const { return 0; }
+	virtual	status_t			SetPanelReflection(int32)
+									{ return B_UNSUPPORTED; }
+
 	virtual sem_id				RetraceSemaphore() = 0;
 	virtual status_t			WaitForRetrace(
 									bigtime_t timeout = B_INFINITE_TIMEOUT) = 0;

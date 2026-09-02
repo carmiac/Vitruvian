@@ -133,6 +133,8 @@ public:
 			status_t			SetBrightness(int32 id, float brightness);
 			status_t			SetRotation(int32 id, int32 rotation);
 			int32				Rotation(int32 id) const;
+			status_t			SetReflection(int32 id, int32 reflection);
+			int32				Reflection(int32 id) const;
 
 			MultiLocker&		ScreenLocker() { return fScreenLock; }
 

@@ -6,6 +6,8 @@
 #define PANEL_ORIENTATION_TRANSFORM_H
 
 
+#include <string.h>
+
 #include <SupportDefs.h>
 
 
@@ -19,30 +21,99 @@ enum {
 };
 
 
+// Matches the "screen_reflection" field on B_SCREEN_BOUNDS_CHANGED. X and Y
+// are independent axes, so BOTH is X | Y and the values double as flags.
+enum {
+	B_PANEL_REFLECTION_NONE = 0,
+	B_PANEL_REFLECTION_X    = 1,
+	B_PANEL_REFLECTION_Y    = 2,
+	B_PANEL_REFLECTION_BOTH = B_PANEL_REFLECTION_X | B_PANEL_REFLECTION_Y
+};
+
+
+// Outcome of reading one of the VOS_PANEL_* overrides.
+enum panel_env_status {
+	B_PANEL_ENV_UNSET,
+	B_PANEL_ENV_SET,
+	B_PANEL_ENV_INVALID
+};
+
+
+// The overrides are the only way to exercise a transformed display on a
+// backend that reports no panel orientation, which is every virtual one.
+// Parsing lives here so the compositor and the greeter cannot drift in what
+// they accept; each caller keeps its own diagnostics.
+static inline panel_env_status
+parse_panel_orientation(const char* value, int32& outOrientation)
+{
+	if (value == NULL || value[0] == '\0')
+		return B_PANEL_ENV_UNSET;
+
+	if (strcmp(value, "normal") == 0 || strcmp(value, "0") == 0)
+		outOrientation = B_PANEL_ORIENTATION_NORMAL;
+	else if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
+		outOrientation = B_PANEL_ORIENTATION_UPSIDE_DOWN;
+	else if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
+		outOrientation = B_PANEL_ORIENTATION_LEFT_UP;
+	else if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
+		outOrientation = B_PANEL_ORIENTATION_RIGHT_UP;
+	else
+		return B_PANEL_ENV_INVALID;
+
+	return B_PANEL_ENV_SET;
+}
+
+
+static inline panel_env_status
+parse_panel_reflection(const char* value, int32& outReflection)
+{
+	if (value == NULL || value[0] == '\0')
+		return B_PANEL_ENV_UNSET;
+
+	if (strcmp(value, "none") == 0 || strcmp(value, "0") == 0)
+		outReflection = B_PANEL_REFLECTION_NONE;
+	else if (strcmp(value, "x") == 0 || strcmp(value, "1") == 0)
+		outReflection = B_PANEL_REFLECTION_X;
+	else if (strcmp(value, "y") == 0 || strcmp(value, "2") == 0)
+		outReflection = B_PANEL_REFLECTION_Y;
+	else if (strcmp(value, "both") == 0 || strcmp(value, "3") == 0)
+		outReflection = B_PANEL_REFLECTION_BOTH;
+	else
+		return B_PANEL_ENV_INVALID;
+
+	return B_PANEL_ENV_SET;
+}
+
+
 // Rotates a normalized (0..1) point in physical panel space into
-// normalized logical (landscape, post-rotation) desktop space.
+// normalized logical (landscape, post-rotation) desktop space. Reflection
+// composes as a post-step here because the forward mapping reflects before
+// rotating, and this is the inverse: un-rotate first, un-reflect second.
 static inline void
 rotate_panel_point(int32 orientation, float u, float v, float& outU,
-	float& outV)
+	float& outV, int32 reflection = B_PANEL_REFLECTION_NONE)
 {
+	float ru, rv;
 	switch (orientation) {
 		case B_PANEL_ORIENTATION_UPSIDE_DOWN:
-			outU = 1.0f - u;
-			outV = 1.0f - v;
+			ru = 1.0f - u;
+			rv = 1.0f - v;
 			break;
 		case B_PANEL_ORIENTATION_LEFT_UP:
-			outU = 1.0f - v;
-			outV = u;
+			ru = 1.0f - v;
+			rv = u;
 			break;
 		case B_PANEL_ORIENTATION_RIGHT_UP:
-			outU = v;
-			outV = 1.0f - u;
+			ru = v;
+			rv = 1.0f - u;
 			break;
 		default:
-			outU = u;
-			outV = v;
+			ru = u;
+			rv = v;
 			break;
 	}
+	outU = (reflection & B_PANEL_REFLECTION_X) != 0 ? 1.0f - ru : ru;
+	outV = (reflection & B_PANEL_REFLECTION_Y) != 0 ? 1.0f - rv : rv;
 }
 
 
@@ -52,26 +123,29 @@ rotate_panel_point(int32 orientation, float u, float v, float& outU,
 // correctly on one axis and inverted on the other.
 static inline void
 rotate_panel_delta(int32 orientation, float dx, float dy, float& outDx,
-	float& outDy)
+	float& outDy, int32 reflection = B_PANEL_REFLECTION_NONE)
 {
+	float rdx, rdy;
 	switch (orientation) {
 		case B_PANEL_ORIENTATION_UPSIDE_DOWN:
-			outDx = -dx;
-			outDy = -dy;
+			rdx = -dx;
+			rdy = -dy;
 			break;
 		case B_PANEL_ORIENTATION_LEFT_UP:
-			outDx = -dy;
-			outDy = dx;
+			rdx = -dy;
+			rdy = dx;
 			break;
 		case B_PANEL_ORIENTATION_RIGHT_UP:
-			outDx = dy;
-			outDy = -dx;
+			rdx = dy;
+			rdy = -dx;
 			break;
 		default:
-			outDx = dx;
-			outDy = dy;
+			rdx = dx;
+			rdy = dy;
 			break;
 	}
+	outDx = (reflection & B_PANEL_REFLECTION_X) != 0 ? -rdx : rdx;
+	outDy = (reflection & B_PANEL_REFLECTION_Y) != 0 ? -rdy : rdy;
 }
 
 

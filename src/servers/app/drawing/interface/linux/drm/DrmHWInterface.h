@@ -44,6 +44,8 @@ struct PlaneProps {
 	uint32_t src_x, src_y, src_w, src_h;
 	uint32_t crtc_x, crtc_y, crtc_w, crtc_h;
 	uint32_t fb_damage_clips;
+	// Captured but never committed: the reference cursor plane (amdgpu)
+	// does not advertise this property. Kept for a plane class that does.
 	uint32_t rotation;
 };
 
@@ -85,6 +87,8 @@ public:
 	virtual	status_t			GetPreferredMode(display_mode* mode);
 	virtual	int32				PanelOrientation() const;
 	virtual	status_t			SetPanelOrientation(int32 orientation);
+	virtual	int32				PanelReflection() const;
+	virtual	status_t			SetPanelReflection(int32 reflection);
 
 	virtual status_t			GetDeviceInfo(accelerant_device_info* info);
 	virtual status_t			GetFrameBufferConfig(
@@ -182,6 +186,7 @@ private:
 			void				_DiscoverCrtcProps(uint32_t crtc_id);
 			void				_DiscoverConnProps(uint32_t conn_id);
 			void				_DiscoverPanelOrientation();
+			void				_DiscoverPanelReflection();
 			bool				_ApplyDmiOrientationQuirk(uint32_t width,
 									uint32_t height);
 			void				_ApplyOrientationSwap(uint32_t w, uint32_t h,
@@ -269,6 +274,8 @@ private:
 			// accessor above hides the bare type name inside this class.
 			enum PanelOrientation
 								fPanelOrientation;
+			// B_PANEL_REFLECTION_* from PanelOrientationTransform.h.
+			int32				fPanelReflection;
 };
 
 #endif

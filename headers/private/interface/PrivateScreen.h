@@ -90,6 +90,10 @@ public:
 			status_t			GetRotation(int32*);
 			status_t			SetRotation(int32);
 
+			// B_PANEL_REFLECTION_*; B_UNSUPPORTED if fixed. No auto state.
+			status_t			GetReflection(int32*);
+			status_t			SetReflection(int32);
+
 			void*				BaseAddress();
 			uint32				BytesPerRow();
 

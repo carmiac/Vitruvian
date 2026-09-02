@@ -239,6 +239,7 @@ class InputServer : public BApplication {
 		BScreen			fScreen;
 		BRect			fFrame;
 		int32			fScreenOrientation;
+		int32			fScreenReflection;
 
 		BLocker			fEventQueueLock;
 		EventList 		fEventQueue;

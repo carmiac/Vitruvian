@@ -121,11 +121,13 @@ InputServerStream::UpdateScreenBounds(BRect bounds)
 
 
 void
-InputServerStream::UpdateScreenBounds(BRect bounds, int32 orientation)
+InputServerStream::UpdateScreenBounds(BRect bounds, int32 orientation,
+	int32 reflection)
 {
 	BMessage update(IS_SCREEN_BOUNDS_UPDATED);
 	update.AddRect("screen_bounds", bounds);
 	update.AddInt32("screen_orientation", orientation);
+	update.AddInt32("screen_reflection", reflection);
 
 	fInputServer.SendMessage(&update);
 }

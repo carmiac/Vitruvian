@@ -21,7 +21,8 @@ class InputManager : public BLocker {
 		InputManager();
 		virtual ~InputManager();
 
-		void UpdateScreenBounds(BRect bounds, int32 orientation = 0);
+		void UpdateScreenBounds(BRect bounds, int32 orientation = 0,
+				int32 reflection = 0);
 
 		bool AddStream(EventStream* stream);
 		void RemoveStream(EventStream* stream);

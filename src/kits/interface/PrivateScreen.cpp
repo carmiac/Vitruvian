@@ -713,6 +713,39 @@ BPrivateScreen::SetRotation(int32 rotation)
 
 
 status_t
+BPrivateScreen::GetReflection(int32* reflection)
+{
+	if (reflection == NULL)
+		return B_BAD_VALUE;
+
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_SCREEN_GET_REFLECTION);
+	link.Attach<int32>(ID());
+
+	status_t status = B_ERROR;
+	if (link.FlushWithReply(status) == B_OK && status == B_OK)
+		link.Read<int32>(reflection);
+
+	return status;
+}
+
+
+status_t
+BPrivateScreen::SetReflection(int32 reflection)
+{
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_SCREEN_SET_REFLECTION);
+	link.Attach<int32>(ID());
+	link.Attach<int32>(reflection);
+
+	status_t status = B_ERROR;
+	link.FlushWithReply(status);
+
+	return status;
+}
+
+
+status_t
 BPrivateScreen::SetBrightness(float brightness)
 {
 	BPrivate::AppServerLink link;

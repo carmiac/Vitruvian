@@ -115,23 +115,24 @@ static const struct {
 };
 
 
-// Only for callers that pass orientation < 0, the constructor default;
-// DrmHWInterface passes its own. Mirrors _DiscoverPanelOrientation()'s
-// parsing, which is where VOS_PANEL_ORIENTATION reaches that path.
+// Only for callers that pass a negative value, the constructor default;
+// DrmHWInterface passes its own. Unrecognized input is left at the default
+// here rather than reported, since the compositor already complains about it.
 static int32
 DiscoverOrientationFromEnv()
 {
-	const char* value = getenv("VOS_PANEL_ORIENTATION");
-	if (value == NULL)
-		return B_PANEL_ORIENTATION_NORMAL;
+	int32 orientation = B_PANEL_ORIENTATION_NORMAL;
+	parse_panel_orientation(getenv("VOS_PANEL_ORIENTATION"), orientation);
+	return orientation;
+}
 
-	if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
-		return B_PANEL_ORIENTATION_UPSIDE_DOWN;
-	if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
-		return B_PANEL_ORIENTATION_LEFT_UP;
-	if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
-		return B_PANEL_ORIENTATION_RIGHT_UP;
-	return B_PANEL_ORIENTATION_NORMAL;
+
+static int32
+DiscoverReflectionFromEnv()
+{
+	int32 reflection = B_PANEL_REFLECTION_NONE;
+	parse_panel_reflection(getenv("VOS_PANEL_REFLECTION"), reflection);
+	return reflection;
 }
 
 
@@ -149,7 +150,7 @@ static uint32 MapMouseButton(uint32 linuxButton)
 
 
 LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height,
-	struct libseat* seat, int32 orientation)
+	struct libseat* seat, int32 orientation, int32 reflection)
 	:
 	fEventList(10),
 	fEventListLocker("evdev event list"),
@@ -172,6 +173,7 @@ LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height,
 	fWidth(width),
 	fHeight(height),
 	fOrientation(orientation >= 0 ? orientation : DiscoverOrientationFromEnv()),
+	fReflection(reflection >= 0 ? reflection : DiscoverReflectionFromEnv()),
 	fSeat(seat),
 	fEpollFd(-1)
 {
@@ -327,16 +329,18 @@ LibEvdevEventStream::_CloseDevice(EvdevDevice& dev)
 void
 LibEvdevEventStream::UpdateScreenBounds(BRect bounds)
 {
-	UpdateScreenBounds(bounds, fOrientation);
+	UpdateScreenBounds(bounds, fOrientation, fReflection);
 }
 
 
 void
-LibEvdevEventStream::UpdateScreenBounds(BRect bounds, int32 orientation)
+LibEvdevEventStream::UpdateScreenBounds(BRect bounds, int32 orientation,
+	int32 reflection)
 {
 	fWidth = bounds.IntegerWidth() + 1;
 	fHeight = bounds.IntegerHeight() + 1;
 	fOrientation = orientation;
+	fReflection = reflection;
 }
 
 
@@ -541,7 +545,15 @@ void
 LibEvdevEventStream::_RotateDelta(float dx, float dy, float& outDx,
 	float& outDy) const
 {
-	rotate_panel_delta(fOrientation, dx, dy, outDx, outDy);
+	rotate_panel_delta(fOrientation, dx, dy, outDx, outDy, fReflection);
+}
+
+
+void
+LibEvdevEventStream::_RotatePoint(float u, float v, float& outU,
+	float& outV) const
+{
+	rotate_panel_point(fOrientation, u, v, outU, outV, fReflection);
 }
 
 
@@ -620,8 +632,7 @@ LibEvdevEventStream::_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev)
 			if (max > min) {
 				fLastAbsU = (float)(ev.value - min) / (max - min);
 				float outU, outV;
-				rotate_panel_point(fOrientation, fLastAbsU, fLastAbsV,
-					outU, outV);
+				_RotatePoint(fLastAbsU, fLastAbsV, outU, outV);
 				fMousePosition.x = outU * fWidth;
 				fMousePosition.y = outV * fHeight;
 				fMouseMoved = true;
@@ -636,8 +647,7 @@ LibEvdevEventStream::_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev)
 			if (max > min) {
 				fLastAbsV = (float)(ev.value - min) / (max - min);
 				float outU, outV;
-				rotate_panel_point(fOrientation, fLastAbsU, fLastAbsV,
-					outU, outV);
+				_RotatePoint(fLastAbsU, fLastAbsV, outU, outV);
 				fMousePosition.x = outU * fWidth;
 				fMousePosition.y = outV * fHeight;
 				fMouseMoved = true;

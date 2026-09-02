@@ -35,9 +35,12 @@ class LibEvdevEventStream : public EventStream {
 public:
 								// orientation: DRM_MODE_PANEL_ORIENTATION_*,
 								// -1 to derive it from VOS_PANEL_ORIENTATION.
+								// reflection: B_PANEL_REFLECTION_*, -1 to
+								// derive it from VOS_PANEL_REFLECTION.
 								LibEvdevEventStream(uint32 width, uint32 height,
 									struct libseat* seat,
-									int32 orientation = -1);
+									int32 orientation = -1,
+									int32 reflection = -1);
 	virtual						~LibEvdevEventStream();
 
 	virtual	bool				IsValid() { return !fDevices.empty(); }
@@ -45,7 +48,7 @@ public:
 
 	virtual	void				UpdateScreenBounds(BRect bounds);
 	virtual	void				UpdateScreenBounds(BRect bounds,
-									int32 orientation);
+									int32 orientation, int32 reflection = 0);
 	virtual	bool				GetNextEvent(BMessage** _event);
 	virtual	status_t			InsertEvent(BMessage* event);
 	virtual	BMessage*			PeekLatestMouseMoved();
@@ -68,6 +71,8 @@ private:
 			void				_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_RotateDelta(float dx, float dy,
 									float& outDx, float& outDy) const;
+			void				_RotatePoint(float u, float v,
+									float& outU, float& outV) const;
 			void				_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_ProcessButtonEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_FlushPendingEvents();
@@ -112,6 +117,7 @@ private:
 			uint32					fWidth;
 			uint32					fHeight;
 			int32					fOrientation;
+			int32					fReflection;
 
 	// libseat integration
 			struct libseat*			fSeat;

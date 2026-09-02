@@ -147,7 +147,7 @@ public:
 			status_t			UpdateTouchpadSettings(const BMessage* message);
 
 			void				UpdateScreenBounds(BRect frame,
-									int32 orientation);
+									int32 orientation, int32 reflection);
 
 			// Hardware name, distinct from fDeviceRef.name (the
 			// identity/settings key).
@@ -186,7 +186,14 @@ private:
 									float& outDx, float& outDy) const
 								{
 									rotate_panel_delta(fOrientation,
-										dx, dy, outDx, outDy);
+										dx, dy, outDx, outDy, fReflection);
+								}
+			// Normalizes and rotates by fOrientation.
+			void				_RotatePoint(float u, float v,
+									float& outU, float& outV) const
+								{
+									rotate_panel_point(fOrientation,
+										u, v, outU, outV, fReflection);
 								}
 
 			BPoint				_TouchPoint(
@@ -238,6 +245,8 @@ private:
 			int32				fScreenW, fScreenH;
 			// DRM_MODE_PANEL_ORIENTATION_*, see PanelOrientationTransform.h
 			int32				fOrientation;
+			// B_PANEL_REFLECTION_*, see PanelOrientationTransform.h
+			int32				fReflection;
 
 			input_device_ref	fDeviceRef;
 			mouse_settings		fSettings;
@@ -312,6 +321,7 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fScreenW(1280),
 	fScreenH(800),
 	fOrientation(B_PANEL_ORIENTATION_NORMAL),
+	fReflection(B_PANEL_REFLECTION_NONE),
 	fDeviceRemapsButtons(false),
 	fSerial(atomic_add(&sNextMouseDeviceSerial, 1)),
 	fThread(-1),
@@ -588,11 +598,13 @@ MouseDevice::UpdateTouchpadSettings(const BMessage* message)
 
 
 void
-MouseDevice::UpdateScreenBounds(BRect frame, int32 orientation)
+MouseDevice::UpdateScreenBounds(BRect frame, int32 orientation,
+	int32 reflection)
 {
 	fScreenW = (int32)(frame.Width() + 1);
 	fScreenH = (int32)(frame.Height() + 1);
 	fOrientation = orientation;
+	fReflection = reflection;
 
 	fCursorPosition.x = std::min(fCursorPosition.x, (float)(fScreenW - 1));
 	fCursorPosition.y = std::min(fCursorPosition.y, (float)(fScreenH - 1));
@@ -899,7 +911,7 @@ MouseDevice::_ControlThread()
 					float u = (float)(currentAbsX - fAbsMinX) / spanX;
 					float v = (float)(currentAbsY - fAbsMinY) / spanY;
 					float outU, outV;
-					rotate_panel_point(fOrientation, u, v, outU, outV);
+					_RotatePoint(u, v, outU, outV);
 					fCursorPosition.x = outU * (fScreenW - 1);
 					fCursorPosition.y = outV * (fScreenH - 1);
 				}
@@ -1225,7 +1237,7 @@ MouseDevice::_TouchPoint(struct libinput_event_touch* tev) const
 	float u = (float)libinput_event_touch_get_x_transformed(tev, 1);
 	float v = (float)libinput_event_touch_get_y_transformed(tev, 1);
 	float outU, outV;
-	rotate_panel_point(fOrientation, u, v, outU, outV);
+	_RotatePoint(u, v, outU, outV);
 	return BPoint(outU * (fScreenW - 1), outV * (fScreenH - 1));
 }
 
@@ -1289,10 +1301,10 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			double v = libinput_event_pointer_get_absolute_y_transformed(
 				pev, 1);
 			float outU, outV;
-			rotate_panel_point(fOrientation, (float)u, (float)v, outU, outV);
+			_RotatePoint((float)u, (float)v, outU, outV);
 
-			fLibinputLastPos.x = outU * fScreenW;
-			fLibinputLastPos.y = outV * fScreenH;
+			fLibinputLastPos.x = outU * (fScreenW - 1);
+			fLibinputLastPos.y = outV * (fScreenH - 1);
 
 			// Sync shared cursor position
 			if (fTarget.fCursorLock.Lock()) {
@@ -1543,6 +1555,19 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				// Touchpad: B_MOUSE_DOWN comes from POINTER_BUTTON (tap-to-click).
 				if (fLibinputIsDirectTouch) {
 					fLibinputTouchSlot0Down = true;
+
+					// A finger arrives without ever having moved there.
+					// Menu tracking follows the pointer rather than the
+					// message, so it needs the move before the press.
+					BMessage* move = new BMessage(B_MOUSE_MOVED);
+					move->AddPoint("where", fLibinputLastPos);
+					move->AddInt32("buttons", 0);
+					move->AddInt32("modifiers", 0);
+					move->AddInt64("when", system_time());
+					move->AddInt32("be:device_subtype",
+						B_TOUCHPAD_POINTING_DEVICE);
+					fTarget.EnqueueMessage(move);
+
 					uint32 tapButton = _RemapButtons(0x1);
 					BMessage* msg = new BMessage(B_MOUSE_DOWN);
 					msg->AddPoint("where", fLibinputLastPos);
@@ -1621,7 +1646,9 @@ MouseInputDevice::MouseInputDevice()
 	fDeviceListLock("MouseInputDevice list"),
 	fCursorPosition(-1, -1),
 	fCursorLock("cursor position lock"),
-	fButtons(0)
+	fButtons(0),
+	fOrientation(B_PANEL_ORIENTATION_NORMAL),
+	fReflection(B_PANEL_REFLECTION_NONE)
 {
 	CALLED();
 
@@ -1738,6 +1765,8 @@ MouseInputDevice::_UpdateScreenBounds(MouseDevice* device, BMessage* message)
 	// Absent on older app_server builds; normal orientation either way.
 	int32 orientation = B_PANEL_ORIENTATION_NORMAL;
 	message->FindInt32("screen_orientation", &orientation);
+	int32 reflection = B_PANEL_REFLECTION_NONE;
+	message->FindInt32("screen_reflection", &reflection);
 
 	// Rescale only the first time this frame is seen (once per device call).
 	if (fCursorLock.Lock()) {
@@ -1750,10 +1779,11 @@ MouseInputDevice::_UpdateScreenBounds(MouseDevice* device, BMessage* message)
 		}
 		fScreenFrame = frame;
 		fOrientation = orientation;
+		fReflection = reflection;
 		fCursorLock.Unlock();
 	}
 
-	device->UpdateScreenBounds(frame, orientation);
+	device->UpdateScreenBounds(frame, orientation, reflection);
 	return B_OK;
 }
 

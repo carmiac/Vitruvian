@@ -74,6 +74,7 @@ public:
 			uint32			fButtons;
 			BRect			fScreenFrame;
 			int32			fOrientation;
+			int32			fReflection;
 };
 
 extern "C" BInputServerDevice* instantiate_input_device();
