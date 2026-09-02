@@ -769,6 +769,20 @@ TermView::CommandIsControlKey() const
 }
 
 
+bool
+TermView::WriteControlCharacter(int32 rawChar)
+{
+	int control = control_character_for(rawChar);
+	if (control < 0 || fShell == NULL)
+		return false;
+
+	char byte = (char)control;
+	_ScrollTo(0, true);
+	fShell->Write(&byte, 1);
+	return true;
+}
+
+
 void
 TermView::SetUseOptionAsMetaKey(bool enable)
 {

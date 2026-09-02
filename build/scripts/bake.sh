@@ -51,6 +51,7 @@ Boot options:
                           exposed via vvfat; a file or block device is a raw disk.
   --enable-console-log   Write serial output to vitruvian-console.log
   --enable-console-stdout  Stream serial output to stdio (combine to tee)
+  --use-bochs-drm        Use QEMU's std VGA (bochs-drm) instead of virtio-gpu
                           (shared-folder/usb-disk: amd64, arm64, riscv64)
 
 Build options:
@@ -60,6 +61,7 @@ Build options:
   --run-qemu             Boot image in QEMU after build
   --enable-console-log   Write serial output to vitruvian-console.log
   --enable-console-stdout  Stream serial output to stdio (combine with --enable-console-log to tee)
+  --use-bochs-drm        Use QEMU's std VGA (bochs-drm) instead of virtio-gpu
   --regenerate-chroot    Recreate the chroot before building
   --arch=ARCH            Target architecture: amd64, arm64, arm32, riscv64
                           (reads from buildstate.conf if omitted)
@@ -136,6 +138,10 @@ cmd_build() {
                 ;;
             --enable-console-log)
                 _console_log=1
+                ;;
+            --use-bochs-drm)
+                VOS_QEMU_VGA=std
+                export VOS_QEMU_VGA
                 ;;
             --enable-console-stdout)
                 _console_stdout=1
@@ -289,6 +295,10 @@ cmd_boot() {
                 ;;
             --enable-console-log)
                 _console_log=1
+                ;;
+            --use-bochs-drm)
+                VOS_QEMU_VGA=std
+                export VOS_QEMU_VGA
                 ;;
             --enable-console-stdout)
                 _console_stdout=1

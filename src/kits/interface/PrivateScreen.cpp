@@ -1,5 +1,6 @@
 /*
  * Copyright 2002-2009, Haiku Inc.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -673,6 +674,39 @@ BPrivateScreen::GetBrightness(float* brightness)
 	status_t status;
 	if (link.FlushWithReply(status) == B_OK && status == B_OK)
 		link.Read<float>(brightness);
+
+	return status;
+}
+
+
+status_t
+BPrivateScreen::GetRotation(int32* rotation)
+{
+	if (rotation == NULL)
+		return B_BAD_VALUE;
+
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_SCREEN_GET_ROTATION);
+	link.Attach<int32>(ID());
+
+	status_t status = B_ERROR;
+	if (link.FlushWithReply(status) == B_OK && status == B_OK)
+		link.Read<int32>(rotation);
+
+	return status;
+}
+
+
+status_t
+BPrivateScreen::SetRotation(int32 rotation)
+{
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_SCREEN_SET_ROTATION);
+	link.Attach<int32>(ID());
+	link.Attach<int32>(rotation);
+
+	status_t status = B_ERROR;
+	link.FlushWithReply(status);
 
 	return status;
 }

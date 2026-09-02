@@ -58,6 +58,16 @@ struct ConnProps {
 	uint32_t dpms;
 };
 
+// Values match the kernel's "panel orientation" connector property
+// (drm_connector.h, DRM_MODE_PANEL_ORIENTATION_*) so a property read casts
+// straight into this enum.
+enum PanelOrientation {
+	PANEL_ORIENTATION_NORMAL      = 0,
+	PANEL_ORIENTATION_UPSIDE_DOWN = 1,
+	PANEL_ORIENTATION_LEFT_UP     = 2,
+	PANEL_ORIENTATION_RIGHT_UP    = 3
+};
+
 class DrmBuffer;
 
 class DrmHWInterface : public HWInterface {
@@ -73,6 +83,8 @@ public:
 	virtual	status_t			SetMode(const display_mode& mode);
 	virtual	void				GetMode(display_mode* mode);
 	virtual	status_t			GetPreferredMode(display_mode* mode);
+	virtual	int32				PanelOrientation() const;
+	virtual	status_t			SetPanelOrientation(int32 orientation);
 
 	virtual status_t			GetDeviceInfo(accelerant_device_info* info);
 	virtual status_t			GetFrameBufferConfig(
@@ -132,6 +144,12 @@ private:
 			void				_EventThreadMain();
 			void				_RestoreDisplay();
 			void				_HandleHotplug();
+			void				_DrainPendingFlip();
+			void				_ScheduleResize();
+	static	int32				_ResizeThreadEntry(void* data);
+			void				_ApplyResize();
+	static	void				_FillModeInfo(display_mode& mode,
+									const drmModeModeInfo& m);
 
 	static	void				_PageFlipHandler(int fd, unsigned int frame,
 									unsigned int sec, unsigned int usec,
@@ -157,11 +175,20 @@ private:
 			int					_CrtcIndex(uint32_t crtc_id);
 			void				_ProbeAtomic();
 			void				_ProbeCursor();
+			void				_DisableHardwareCursor();
 			void				_DiscoverProperties();
 			void				_DiscoverPlaneProps(uint32_t plane_id,
 									PlaneProps& props);
 			void				_DiscoverCrtcProps(uint32_t crtc_id);
 			void				_DiscoverConnProps(uint32_t conn_id);
+			void				_DiscoverPanelOrientation();
+			bool				_ApplyDmiOrientationQuirk(uint32_t width,
+									uint32_t height);
+			void				_ApplyOrientationSwap(uint32_t w, uint32_t h,
+									uint32_t& outW, uint32_t& outH) const;
+			// False when rotated or when we own no cursor plane.
+			// VOS_HW_CURSOR forces the legacy sprite on for testing.
+			bool				_HardwareCursorUsable() const;
 
 			status_t			_AtomicModeset(uint32_t fb_id,
 									drmModeModeInfo* mode);
@@ -189,6 +216,9 @@ private:
 			std::atomic<bool>	fRunning;
 
 			thread_id			fEventThread;
+			thread_id			fResizeThread;
+			std::atomic<bool>	fResizeBusy;
+			std::atomic<bool>	fResizePending;
 			sem_id				fSessionSem;
 
 			struct udev*		fUdev;
@@ -224,6 +254,8 @@ private:
 			bool				fAtomicSupported;
 			uint32_t			fPrimaryPlaneId;
 			uint32_t			fCursorPlaneId;
+			// Which API armed the cursor plane; set once by _ProbeCursor().
+			bool				fCursorUsesAtomic;
 			uint32_t			fModeBlobId;
 			struct PlaneProps	fPlaneProps;
 			struct PlaneProps	fCursorPlaneProps;
@@ -232,6 +264,11 @@ private:
 
 			bool				fVRRSupported;
 			bool				fVRREnabled;
+
+			// Elaborated as "enum PanelOrientation": the PanelOrientation()
+			// accessor above hides the bare type name inside this class.
+			enum PanelOrientation
+								fPanelOrientation;
 };
 
 #endif

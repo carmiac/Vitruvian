@@ -1,5 +1,6 @@
 /*
  * Copyright 2002-2009, Haiku Inc.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -84,6 +85,10 @@ public:
 
 			status_t			GetBrightness(float*);
 			status_t			SetBrightness(float);
+
+			// 0..3 as B_PANEL_ORIENTATION_*, -1 auto; B_UNSUPPORTED if fixed.
+			status_t			GetRotation(int32*);
+			status_t			SetRotation(int32);
 
 			void*				BaseAddress();
 			uint32				BytesPerRow();

@@ -208,10 +208,13 @@ MouseSettings::_EnsureValidMapping()
 {
 	bool hasPrimary = false;
 
-	for (int i = 0; i < MouseType(); i++) {
+	// Whole array: the add-on remaps every bit the device reports, not
+	// just the buttons the preflet draws.
+	for (int i = 0; i < B_MAX_MOUSE_BUTTONS; i++) {
 		if (fSettings.map.button[i] == 0)
 			fSettings.map.button[i] = B_MOUSE_BUTTON(i + 1);
-		hasPrimary |= fSettings.map.button[i] & B_MOUSE_BUTTON(1);
+		if (i < MouseType())
+			hasPrimary |= fSettings.map.button[i] & B_MOUSE_BUTTON(1);
 	}
 
 	if (!hasPrimary)

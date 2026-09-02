@@ -6,6 +6,9 @@ set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
 	OWNER_READ OWNER_WRITE OWNER_EXECUTE
 	GROUP_READ GROUP_EXECUTE
 	WORLD_READ WORLD_EXECUTE)
+  
+#   ln -s generated.amd64/compile_commands.json compile_commands.json
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # TODO shouldn't we resolve an absolute path here? it kind of works
 # only if buildtools is in the project source dir, which...we don't

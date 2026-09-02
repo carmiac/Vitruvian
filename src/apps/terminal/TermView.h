@@ -52,6 +52,9 @@ class Shell;
 // own default puts it on Alt).
 bool command_is_control_key(const key_map* keymap);
 
+// The control character a key produces when Control is held, or -1.
+int control_character_for(int32 rawChar);
+
 
 class TermView : public BView, private TermViewHighlighter {
 public:
@@ -115,6 +118,8 @@ public:
 
 			//! Shorthand for command_is_control_key(fKeymap).
 			bool				CommandIsControlKey() const;
+			//! Writes the control character rawChar stands for.
+			bool				WriteControlCharacter(int32 rawChar);
 			void				SetUseOptionAsMetaKey(bool enable);
 
 			void				SetMouseClipboard(BClipboard *);

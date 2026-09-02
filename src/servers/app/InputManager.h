@@ -1,5 +1,6 @@
 /*
  * Copyright 2005, Haiku, Inc. All Rights Reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -20,7 +21,7 @@ class InputManager : public BLocker {
 		InputManager();
 		virtual ~InputManager();
 
-		void UpdateScreenBounds(BRect bounds);
+		void UpdateScreenBounds(BRect bounds, int32 orientation = 0);
 
 		bool AddStream(EventStream* stream);
 		void RemoveStream(EventStream* stream);

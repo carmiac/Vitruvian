@@ -979,6 +979,23 @@ BKeymap::PopulateFromXkb(struct xkb_keymap* xkbKeymap)
 					}
 				}
 
+				if (slot == 0) {
+					// Slot 0 must hold <dead_X> <space>: IsDeadKey() reads
+					// pairs[1] to identify the dead key.
+					uint32 spacing
+						= haiku_byte_for_keysym(deadKeyTables[i].keysym);
+					int32 triggerOffset = append_codepoint(fChars, writePos,
+						kMaxChars, 0x20);
+					int32 resultOffset = append_codepoint(fChars, writePos,
+						kMaxChars, spacing);
+					if (spacing != 0 && triggerOffset != 0
+						&& resultOffset != 0) {
+						pairs[0] = triggerOffset;
+						pairs[1] = resultOffset;
+						slot = 2;
+					}
+				}
+
 				for (int c = 0; c < candidateCount && slot + 1 < 32; c++) {
 					int32 triggerOffset = append_codepoint(fChars, writePos,
 						kMaxChars, candidates[c].baseUcs4);

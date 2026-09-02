@@ -49,6 +49,15 @@ run_qemu() {
         _extra_drives="$_extra_drives -device qemu-xhci,id=xhci -drive if=none,id=usbdisk,file=$_usb_file,format=raw -device usb-storage,bus=xhci.0,drive=usbdisk,removable=on"
     fi
 
+    # virtio-gpu by default; VOS_QEMU_VGA=std selects bochs-drm for
+    # reproducing the paths that differ there. "-vga none" avoids QEMU
+    # adding a second default adapter alongside the explicit device.
+    if [ "${VOS_QEMU_VGA:-virtio}" = "std" ]; then
+        _vga_args="-vga std"
+    else
+        _vga_args="-vga none -device virtio-vga,xres=1280,yres=800,edid=on"
+    fi
+
     _logfile="$_basedir/vitruvian-console.log"
     if [ "$_console_stdout" -eq 1 ] && [ "$_console_log" -eq 1 ]; then
         _serial_args="-chardev stdio,id=ch0,mux=on,signal=off,logfile=$_logfile -serial chardev:ch0"
@@ -79,6 +88,7 @@ run_qemu() {
                 -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
                 -device virtio-net-pci,netdev=mynet \
                 -device intel-hda -device hda-duplex,audiodev=snd0 -audiodev pa,id=snd0 \
+                $_vga_args \
                 $_extra_drives \
                 $_serial_args
             ;;
@@ -100,6 +110,7 @@ run_qemu() {
                         -device virtio-net-pci,netdev=mynet \
                         -device intel-hda -device hda-duplex,audiodev=snd0 -audiodev pa,id=snd0 \
                         -virtfs local,path="$_host_shared",mount_tag=host_shared,security_model=mapped-xattr,id=host_shared \
+                        $_vga_args \
                         $_extra_drives \
                         $_serial_args
                     ;;
@@ -145,6 +156,7 @@ run_qemu() {
                         -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
                         -device virtio-net-pci,netdev=mynet \
                         -device intel-hda -device hda-duplex,audiodev=snd0 -audiodev pa,id=snd0 \
+                        $_vga_args \
                         $_extra_drives \
                         $_serial_args
                     ;;

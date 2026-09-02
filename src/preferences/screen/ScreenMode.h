@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2011, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -65,6 +66,10 @@ public:
 									float* _diagonalInches = NULL);
 
 			status_t			GetDeviceInfo(accelerant_device_info& info);
+
+			// A screen property, not part of a mode: no mode carries rotation.
+			status_t			SetRotation(int32 rotation);
+			int32				Rotation() const;
 
 			screen_mode			ModeAt(int32 index);
 			const display_mode&	DisplayModeAt(int32 index);

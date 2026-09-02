@@ -3,7 +3,7 @@ AddOn(
 	SHARED
 
 	LIBS
-	${INPUT_LIBRARIES} ${EVDEV_LIBRARIES} ${XKBCOMMON_LIBRARIES} be shared localestub
+	${INPUT_LIBRARIES} ${EVDEV_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${UDEV_LIBRARIES} be shared localestub
 
 	SOURCES
 	KeyboardInputDevice.cpp

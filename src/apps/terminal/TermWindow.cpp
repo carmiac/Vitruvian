@@ -709,6 +709,26 @@ TermWindow::_GetPreferredFont(BFont& font)
 }
 
 
+// BWindow eats Command+key combos that match no shortcut, so in ctrl mode
+// the control character the shell is owed never reaches the view.
+void
+TermWindow::DispatchMessage(BMessage* message, BHandler* handler)
+{
+	int32 modifiers;
+	int32 rawChar;
+	if (message->what == B_KEY_DOWN && command_is_control_key(fKeymap)
+		&& message->FindInt32("modifiers", &modifiers) == B_OK
+		&& (modifiers & (B_COMMAND_KEY | B_SHIFT_KEY)) == B_COMMAND_KEY
+		&& message->FindInt32("raw_char", &rawChar) == B_OK) {
+		TermView* view = _ActiveTermView();
+		if (view != NULL && view->WriteControlCharacter(rawChar))
+			return;
+	}
+
+	BWindow::DispatchMessage(message, handler);
+}
+
+
 void
 TermWindow::MessageReceived(BMessage *message)
 {

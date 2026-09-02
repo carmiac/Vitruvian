@@ -1,6 +1,7 @@
 /*
  * Copyright 2004-2025, Haiku.
  * Copyright 2026, The Vitruvian Project
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the GPL License.
  *
  * Authors:
@@ -15,6 +16,7 @@
 #include <InterfaceDefs.h>
 #include <Locker.h>
 #include <Point.h>
+#include <Rect.h>
 
 #include <ObjectList.h>
 
@@ -40,6 +42,8 @@ private:
 	// find a better way...
 
 			status_t		_HandleMonitor(BMessage* message);
+			status_t		_UpdateScreenBounds(MouseDevice* device,
+								BMessage* message);
 			void			_RecursiveScan(const char* directory);
 
 			MouseDevice*	_FindDevice(const char* path) const;
@@ -65,6 +69,11 @@ public:
 	// fCursorLock so relative and absolute devices never fight over position.
 			BPoint			fCursorPosition;	// (-1,-1) = not yet initialised
 			BLocker			fCursorLock;
+			// Union of buttons across devices; a seat can split motion
+			// and clicks across two (e.g. VirtualBox's integration device).
+			uint32			fButtons;
+			BRect			fScreenFrame;
+			int32			fOrientation;
 };
 
 extern "C" BInputServerDevice* instantiate_input_device();

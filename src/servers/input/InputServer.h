@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2013 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  */
 #ifndef INPUT_SERVER_APP_H
@@ -237,6 +238,7 @@ class InputServer : public BApplication {
 
 		BScreen			fScreen;
 		BRect			fFrame;
+		int32			fScreenOrientation;
 
 		BLocker			fEventQueueLock;
 		EventList 		fEventQueue;

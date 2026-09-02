@@ -31,6 +31,8 @@ public:
 private:
 		status_t			FindDevice();
 		void				AddDevice(BInputDevice* device);
+		BString				UniqueDisplayName(const BString& name);
+		void				FitListToLabels();
 
 private:
 		BListView*			fDeviceListView;

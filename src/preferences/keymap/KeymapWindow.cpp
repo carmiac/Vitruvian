@@ -1076,10 +1076,10 @@ KeymapWindow::_UpdateSwitchShortcutButton()
 	const char* label = B_TRANSLATE("Switch shortcut keys");
 	if (fCurrentMap.KeyForModifier(B_LEFT_COMMAND_KEY) == 0x5d
 		&& fCurrentMap.KeyForModifier(B_LEFT_CONTROL_KEY) == 0x5c) {
-		label = B_TRANSLATE("Switch shortcut keys to Windows/Linux mode");
+		label = B_TRANSLATE("Switch shortcut keys to Linux mode");
 	} else if (fCurrentMap.KeyForModifier(B_LEFT_COMMAND_KEY) == 0x5c
 		&& fCurrentMap.KeyForModifier(B_LEFT_CONTROL_KEY) == 0x5d) {
-		label = B_TRANSLATE("Switch shortcut keys to Haiku mode");
+		label = B_TRANSLATE("Switch shortcut keys to Classic mode");
 	}
 
 	fSwitchShortcutsButton->SetLabel(label);

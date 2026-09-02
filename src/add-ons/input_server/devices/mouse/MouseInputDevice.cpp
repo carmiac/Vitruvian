@@ -1,6 +1,7 @@
 /*
  * Copyright 2004-2025, Haiku.
  * Copyright 2026, The Vitruvian Project
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the GPL License.
  *
  * Authors:
@@ -15,6 +16,8 @@
 
 
 #include "MouseInputDevice.h"
+
+#include "UdevDeviceName.h"
 
 #include <algorithm>
 #include <errno.h>
@@ -41,6 +44,7 @@
 #include <sys/epoll.h>
 #include <sys/stat.h>
 #include "LinuxEvdevShim.h"
+#include "PanelOrientationTransform.h"
 
 #include <libinput.h>
 
@@ -142,6 +146,9 @@ public:
 			status_t			UpdateSettings();
 			status_t			UpdateTouchpadSettings(const BMessage* message);
 
+			void				UpdateScreenBounds(BRect frame,
+									int32 orientation);
+
 			// Hardware name, distinct from fDeviceRef.name (the
 			// identity/settings key).
 			status_t			GetDescription(BMessage* message) const;
@@ -174,6 +181,16 @@ private:
 
 			// libinput event handling
 			void				_LibinputHandleEvent(struct libinput_event* ev);
+			// Normalizes, rotates by fOrientation and scales to screen.
+			void				_RotateDelta(float dx, float dy,
+									float& outDx, float& outDy) const
+								{
+									rotate_panel_delta(fOrientation,
+										dx, dy, outDx, outDy);
+								}
+
+			BPoint				_TouchPoint(
+									struct libinput_event_touch* tev) const;
 
 private:
 			MouseInputDevice&	fTarget;
@@ -213,10 +230,14 @@ private:
 			// A clickpad reports finger position on the pad, so it
 			// needs delta tracking, not a position jump.
 			bool				fIsAbsoluteTouchpad;
+			uint32				fSharedButtons;
+			int32				fAbsMinX, fAbsMinY;
 			int32				fAbsMaxX, fAbsMaxY;
 			int32				fLastAbsX, fLastAbsY;
 			BPoint				fCursorPosition;
 			int32				fScreenW, fScreenH;
+			// DRM_MODE_PANEL_ORIENTATION_*, see PanelOrientationTransform.h
+			int32				fOrientation;
 
 			input_device_ref	fDeviceRef;
 			mouse_settings		fSettings;
@@ -280,6 +301,9 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fLastClickButtons(0),
 	fIsAbsolute(false),
 	fIsAbsoluteTouchpad(false),
+	fSharedButtons(0),
+	fAbsMinX(0),
+	fAbsMinY(0),
 	fAbsMaxX(65535),
 	fAbsMaxY(65535),
 	fLastAbsX(-1),
@@ -287,6 +311,7 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fCursorPosition(0, 0),
 	fScreenW(1280),
 	fScreenH(800),
+	fOrientation(B_PANEL_ORIENTATION_NORMAL),
 	fDeviceRemapsButtons(false),
 	fSerial(atomic_add(&sNextMouseDeviceSerial, 1)),
 	fThread(-1),
@@ -302,10 +327,13 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
 	fDeviceRef.type = B_POINTING_DEVICE;
 	fDeviceRef.cookie = this;
 
+	memset(&fSettings, 0, sizeof(fSettings));
+
 	for (int i = 0; i < B_MAX_MOUSE_BUTTONS; i++)
 		fSettings.map.button[i] = B_MOUSE_BUTTON(i + 1);
 	// Default speed so cursor moves before settings are loaded (speed=0 -> frozen)
 	fSettings.accel.speed = 65536;
+	fSettings.click_speed = 500000;
 }
 
 
@@ -406,6 +434,10 @@ MouseDevice::_Classify()
 		int my = libevdev_get_abs_maximum(evdev, ABS_Y);
 		if (mx > 0) fAbsMaxX = mx;
 		if (my > 0) fAbsMaxY = my;
+		// A tablet's axis need not start at zero, and the span is what
+		// the report scales against, not the maximum on its own.
+		fAbsMinX = libevdev_get_abs_minimum(evdev, ABS_X);
+		fAbsMinY = libevdev_get_abs_minimum(evdev, ABS_Y);
 
 		// INPUT_PROP_BUTTONPAD/BTN_TOOL_FINGER separates a clickpad
 		// from a real tablet.
@@ -555,6 +587,20 @@ MouseDevice::UpdateTouchpadSettings(const BMessage* message)
 }
 
 
+void
+MouseDevice::UpdateScreenBounds(BRect frame, int32 orientation)
+{
+	fScreenW = (int32)(frame.Width() + 1);
+	fScreenH = (int32)(frame.Height() + 1);
+	fOrientation = orientation;
+
+	fCursorPosition.x = std::min(fCursorPosition.x, (float)(fScreenW - 1));
+	fCursorPosition.y = std::min(fCursorPosition.y, (float)(fScreenH - 1));
+	fLibinputLastPos.x = std::min(fLibinputLastPos.x, (float)(fScreenW - 1));
+	fLibinputLastPos.y = std::min(fLibinputLastPos.y, (float)(fScreenH - 1));
+}
+
+
 status_t
 MouseDevice::GetDescription(BMessage* message) const
 {
@@ -570,7 +616,18 @@ MouseDevice::GetDescription(BMessage* message) const
 	if (name == NULL || name[0] == '\0')
 		return B_NAME_NOT_FOUND;
 
-	return message->AddString("description", name);
+	status_t status = message->AddString("description", name);
+	if (status != B_OK)
+		return status;
+
+	BString model;
+	int32 role = UDEV_ROLE_UNKNOWN;
+	udev_device_name(fPath.String(), model, role);
+	if (!model.IsEmpty())
+		message->AddString("short_description", model);
+	message->AddInt32("role", role);
+
+	return B_OK;
 }
 
 
@@ -649,6 +706,8 @@ MouseDevice::_ControlThread()
 	if (fTarget.fCursorLock.Lock()) {
 		if (fTarget.fCursorPosition.x < 0)
 			fTarget.fCursorPosition.Set(fScreenW / 2.0f, fScreenH / 2.0f);
+		if (!fTarget.fScreenFrame.IsValid())
+			fTarget.fScreenFrame.Set(0, 0, fScreenW - 1, fScreenH - 1);
 		fCursorPosition = fTarget.fCursorPosition;
 		fLibinputLastPos = fTarget.fCursorPosition;
 		fTarget.fCursorLock.Unlock();
@@ -830,13 +889,37 @@ MouseDevice::_ControlThread()
 			// position first so deltas from this device compose with moves from any
 			// other device (e.g. a touchpad that was used moments ago).
 			if (fIsAbsolute && !fIsAbsoluteTouchpad && currentAbsX >= 0) {
-				fCursorPosition.x = (float)currentAbsX / fAbsMaxX * fScreenW;
-				fCursorPosition.y = (float)currentAbsY / fAbsMaxY * fScreenH;
+				// Scale onto the last pixel, not the pixel count, or full
+				// deflection lands one column past the right edge.
+				int32 spanX = fAbsMaxX - fAbsMinX;
+				int32 spanY = fAbsMaxY - fAbsMinY;
+				if (spanX > 0 && spanY > 0) {
+					// Normalize into physical panel space, rotate into
+					// logical (landscape) space, then scale.
+					float u = (float)(currentAbsX - fAbsMinX) / spanX;
+					float v = (float)(currentAbsY - fAbsMinY) / spanY;
+					float outU, outV;
+					rotate_panel_point(fOrientation, u, v, outU, outV);
+					fCursorPosition.x = outU * (fScreenW - 1);
+					fCursorPosition.y = outV * (fScreenH - 1);
+				}
+
+				fCursorPosition.x = std::max(0.0f,
+					std::min((float)(fScreenW - 1), fCursorPosition.x));
+				fCursorPosition.y = std::max(0.0f,
+					std::min((float)(fScreenH - 1), fCursorPosition.y));
 				fLastAbsX = currentAbsX;
 				fLastAbsY = currentAbsY;
 				xdelta = 1; // non-zero to trigger movement message
 				ydelta = 0;
 			} else {
+				// Refresh unconditionally: another device on the same seat
+				// may own all the motion while this one only reports buttons.
+				if (fTarget.fCursorLock.Lock()) {
+					fCursorPosition = fTarget.fCursorPosition;
+					fTarget.fCursorLock.Unlock();
+				}
+
 				if (fIsAbsoluteTouchpad && currentAbsX >= 0) {
 					// Touchpad sample is finger position on the pad,
 					// not screen.
@@ -849,10 +932,12 @@ MouseDevice::_ControlThread()
 				}
 
 				if (xdelta != 0 || ydelta != 0) {
-					if (fTarget.fCursorLock.Lock()) {
-						fCursorPosition = fTarget.fCursorPosition;
-						fTarget.fCursorLock.Unlock();
-					}
+					float rx, ry;
+					_RotateDelta((float)xdelta,
+						(float)ydelta, rx, ry);
+					xdelta = (int32)rx;
+					ydelta = (int32)ry;
+
 					float histX = 0, histY = 0;
 					mouse_movement mv;
 					memset(&mv, 0, sizeof(mv));
@@ -884,6 +969,16 @@ MouseDevice::_ControlThread()
 				continue;
 
 			uint32 remappedButtons = _RemapButtons(currentButtons);
+
+			// Report the union so this device's move doesn't drop a
+			// button another device is holding.
+			if (fTarget.fCursorLock.Lock()) {
+				fTarget.fButtons = (fTarget.fButtons & ~fSharedButtons)
+					| remappedButtons;
+				fSharedButtons = remappedButtons;
+				remappedButtons = fTarget.fButtons;
+				fTarget.fCursorLock.Unlock();
+			}
 
 			// Button events
 			if (changedButtons != 0) {
@@ -920,11 +1015,15 @@ MouseDevice::_ControlThread()
 
 			// Scroll wheel
 			if (wheel_ydelta != 0 || wheel_xdelta != 0) {
+				float wx, wy;
+				_RotateDelta((float)wheel_xdelta,
+					(float)wheel_ydelta, wx, wy);
+
 				BMessage* message = new BMessage(B_MOUSE_WHEEL_CHANGED);
 				if (message != NULL) {
 					message->AddInt64("when", timestamp);
-					message->AddFloat("be:wheel_delta_x", wheel_xdelta);
-					message->AddFloat("be:wheel_delta_y", wheel_ydelta);
+					message->AddFloat("be:wheel_delta_x", wx);
+					message->AddFloat("be:wheel_delta_y", wy);
 					fTarget.EnqueueMessage(message);
 				}
 			}
@@ -936,6 +1035,14 @@ MouseDevice::_ControlThread()
 void
 MouseDevice::_ControlThreadCleanup()
 {
+	// Withdraw our bits first: unplugging a device mid-click would
+	// otherwise leave a button stuck down for everyone else.
+	if (fSharedButtons != 0 && fTarget.fCursorLock.Lock()) {
+		fTarget.fButtons &= ~fSharedButtons;
+		fSharedButtons = 0;
+		fTarget.fCursorLock.Unlock();
+	}
+
 	// Do NOT pre-clear fThread here: Stop() (invoked from the delete this
 	// triggers, on whichever thread ends up performing it) tells self-
 	// removal apart from external removal by comparing fThread against
@@ -1112,6 +1219,17 @@ MouseDevice::_RemapButtons(uint32 buttons) const
 // #pragma mark - libinput event handling
 
 
+BPoint
+MouseDevice::_TouchPoint(struct libinput_event_touch* tev) const
+{
+	float u = (float)libinput_event_touch_get_x_transformed(tev, 1);
+	float v = (float)libinput_event_touch_get_y_transformed(tev, 1);
+	float outU, outV;
+	rotate_panel_point(fOrientation, u, v, outU, outV);
+	return BPoint(outU * (fScreenW - 1), outV * (fScreenH - 1));
+}
+
+
 void
 MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 {
@@ -1124,8 +1242,11 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			double dx = libinput_event_pointer_get_dx(pev);
-			double dy = libinput_event_pointer_get_dy(pev);
+			double rawDx = libinput_event_pointer_get_dx(pev);
+			double rawDy = libinput_event_pointer_get_dy(pev);
+			float dx, dy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				dx, dy);
 
 			// Sync from shared slot before applying delta
 			if (fTarget.fCursorLock.Lock()) {
@@ -1133,8 +1254,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				fTarget.fCursorLock.Unlock();
 			}
 
-			fLibinputLastPos.x += (float)dx;
-			fLibinputLastPos.y += (float)dy;
+			fLibinputLastPos.x += dx;
+			fLibinputLastPos.y += dy;
 			fLibinputLastPos.x = std::max(0.0f,
 				std::min((float)(fScreenW - 1), fLibinputLastPos.x));
 			fLibinputLastPos.y = std::max(0.0f,
@@ -1148,7 +1269,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 
 			BMessage* msg = new BMessage(B_MOUSE_MOVED);
 			msg->AddPoint("where", fLibinputLastPos);
-			msg->AddInt32("buttons", (int32)fLibinputButtons);
+			msg->AddInt32("buttons", (int32)_RemapButtons(fLibinputButtons));
 			msg->AddInt32("modifiers", 0);
 			msg->AddInt64("when", system_time());
 			msg->AddInt32("be:device_subtype", B_TOUCHPAD_POINTING_DEVICE);
@@ -1161,14 +1282,17 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			// Use current screen size (read once at thread start)
-			double x = libinput_event_pointer_get_absolute_x_transformed(
-				pev, fScreenW);
-			double y = libinput_event_pointer_get_absolute_y_transformed(
-				pev, fScreenH);
+			// Normalize into physical panel space (width=1, height=1),
+			// rotate into logical space, then scale to the screen.
+			double u = libinput_event_pointer_get_absolute_x_transformed(
+				pev, 1);
+			double v = libinput_event_pointer_get_absolute_y_transformed(
+				pev, 1);
+			float outU, outV;
+			rotate_panel_point(fOrientation, (float)u, (float)v, outU, outV);
 
-			fLibinputLastPos.x = (float)x;
-			fLibinputLastPos.y = (float)y;
+			fLibinputLastPos.x = outU * fScreenW;
+			fLibinputLastPos.y = outV * fScreenH;
 
 			// Sync shared cursor position
 			if (fTarget.fCursorLock.Lock()) {
@@ -1178,7 +1302,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 
 			BMessage* msg = new BMessage(B_MOUSE_MOVED);
 			msg->AddPoint("where", fLibinputLastPos);
-			msg->AddInt32("buttons", (int32)fLibinputButtons);
+			msg->AddInt32("buttons", (int32)_RemapButtons(fLibinputButtons));
 			msg->AddInt32("modifiers", 0);
 			msg->AddInt64("when", system_time());
 			msg->AddInt32("be:device_subtype", B_MOUSE_POINTING_DEVICE);
@@ -1216,7 +1340,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 
 			BMessage* msg = new BMessage(what);
 			msg->AddPoint("where", where);
-			msg->AddInt32("buttons", (int32)fLibinputButtons);
+			msg->AddInt32("buttons", (int32)_RemapButtons(fLibinputButtons));
 			msg->AddInt32("modifiers", 0);
 			msg->AddInt64("when", system_time());
 			msg->AddInt32("be:device_subtype", B_TOUCHPAD_POINTING_DEVICE);
@@ -1245,9 +1369,12 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
 			double rawDy = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+			float scrollDx, scrollDy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				scrollDx, scrollDy);
 
-			fLibinputScrollAccX += rawDx;
-			fLibinputScrollAccY += rawDy;
+			fLibinputScrollAccX += scrollDx;
+			fLibinputScrollAccY += scrollDy;
 
 			const float kStepSize = 1.0f;
 			int32 stepsX = 0, stepsY = 0;
@@ -1288,13 +1415,16 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			struct libinput_event_pointer* pev =
 				libinput_event_get_pointer_event(event);
 
-			double dx = libinput_event_pointer_get_scroll_value(pev,
+			double rawDx = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
-			double dy = libinput_event_pointer_get_scroll_value(pev,
+			double rawDy = libinput_event_pointer_get_scroll_value(pev,
 				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+			float scrollDx, scrollDy;
+			_RotateDelta((float)rawDx, (float)rawDy,
+				scrollDx, scrollDy);
 
-			fLibinputScrollAccX += dx;
-			fLibinputScrollAccY += dy;
+			fLibinputScrollAccX += scrollDx;
+			fLibinputScrollAccY += scrollDy;
 
 			const float kStepSize = 1.0f;
 			int32 stepsX = 0, stepsY = 0;
@@ -1341,10 +1471,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 			// Slot 1 = second finger: track for two-finger scroll
 			if (slot == 1) {
 				if (type == LIBINPUT_EVENT_TOUCH_DOWN) {
-					float sx = (float)libinput_event_touch_get_x_transformed(
-						tev, fScreenW);
-					float sy = (float)libinput_event_touch_get_y_transformed(
-						tev, fScreenH);
+					BPoint p = _TouchPoint(tev);
+					float sx = p.x, sy = p.y;
 					fLibinputTouchSlot1Active = true;
 					fLibinputTouchSlot1LastX  = sx;
 					fLibinputTouchSlot1LastY  = sy;
@@ -1356,10 +1484,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 					fLibinputTouchScrollAccY  = 0;
 				} else if (type == LIBINPUT_EVENT_TOUCH_MOTION
 					&& fLibinputTouchSlot1Active) {
-					float sx = (float)libinput_event_touch_get_x_transformed(
-						tev, fScreenW);
-					float sy = (float)libinput_event_touch_get_y_transformed(
-						tev, fScreenH);
+					BPoint p = _TouchPoint(tev);
+					float sx = p.x, sy = p.y;
 					float dx = sx - fLibinputTouchSlot1LastX;
 					float dy = sy - fLibinputTouchSlot1LastY;
 					fLibinputTouchSlot1LastX = sx;
@@ -1406,12 +1532,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				break;
 
 			if (type == LIBINPUT_EVENT_TOUCH_DOWN) {
-				float sx = (float)libinput_event_touch_get_x_transformed(
-					tev, fScreenW);
-				float sy = (float)libinput_event_touch_get_y_transformed(
-					tev, fScreenH);
-				fLibinputLastPos.x = sx;
-				fLibinputLastPos.y = sy;
+				fLibinputLastPos = _TouchPoint(tev);
 
 				if (fTarget.fCursorLock.Lock()) {
 					fTarget.fCursorPosition = fLibinputLastPos;
@@ -1422,13 +1543,14 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				// Touchpad: B_MOUSE_DOWN comes from POINTER_BUTTON (tap-to-click).
 				if (fLibinputIsDirectTouch) {
 					fLibinputTouchSlot0Down = true;
+					uint32 tapButton = _RemapButtons(0x1);
 					BMessage* msg = new BMessage(B_MOUSE_DOWN);
 					msg->AddPoint("where", fLibinputLastPos);
-					msg->AddInt32("buttons", 1);
+					msg->AddInt32("buttons", (int32)tapButton);
 					msg->AddInt32("modifiers", 0);
 					msg->AddInt64("when", system_time());
 					msg->AddInt32("clicks", 1);
-					msg->AddInt32("be:button", 1);
+					msg->AddInt32("be:button", (int32)tapButton);
 					msg->AddInt32("be:device_subtype",
 						B_TOUCHPAD_POINTING_DEVICE);
 					fTarget.EnqueueMessage(msg);
@@ -1450,12 +1572,7 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				if (fLibinputTouchSlot1Active)
 					break;
 
-				float sx = (float)libinput_event_touch_get_x_transformed(
-					tev, fScreenW);
-				float sy = (float)libinput_event_touch_get_y_transformed(
-					tev, fScreenH);
-				fLibinputLastPos.x = sx;
-				fLibinputLastPos.y = sy;
+				fLibinputLastPos = _TouchPoint(tev);
 
 				if (fTarget.fCursorLock.Lock()) {
 					fTarget.fCursorPosition = fLibinputLastPos;
@@ -1467,7 +1584,8 @@ MouseDevice::_LibinputHandleEvent(struct libinput_event* event)
 				uint32 moveBtns = 0;
 				bool shouldEmit = false;
 				if (fLibinputIsDirectTouch) {
-					moveBtns = fLibinputTouchSlot0Down ? 1 : 0;
+					moveBtns = fLibinputTouchSlot0Down
+						? _RemapButtons(0x1) : 0;
 					shouldEmit = true;
 				} else if (fLibinputButtons == 0) {
 					moveBtns = 0;
@@ -1502,7 +1620,8 @@ MouseInputDevice::MouseInputDevice()
 	fDevices(2),
 	fDeviceListLock("MouseInputDevice list"),
 	fCursorPosition(-1, -1),
-	fCursorLock("cursor position lock")
+	fCursorLock("cursor position lock"),
+	fButtons(0)
 {
 	CALLED();
 
@@ -1571,6 +1690,9 @@ MouseInputDevice::Stop(const char* name, void* cookie)
 	TRACE("%s(%s)\n", __PRETTY_FUNCTION__, name);
 
 	MouseDevice* device = (MouseDevice*)cookie;
+	if (device == NULL)
+		return B_BAD_VALUE;
+
 	device->Stop();
 
 	return B_OK;
@@ -1594,11 +1716,45 @@ MouseInputDevice::Control(const char* name, void* cookie,
 	if (command == B_GET_DEVICE_DESCRIPTION)
 		return device->GetDescription(message);
 
+	if (command == B_SCREEN_BOUNDS_CHANGED)
+		return _UpdateScreenBounds(device, message);
+
 	if (command >= B_MOUSE_TYPE_CHANGED
 		&& command <= B_MOUSE_ACCELERATION_CHANGED)
 		return device->UpdateSettings();
 
 	return B_BAD_VALUE;
+}
+
+
+status_t
+MouseInputDevice::_UpdateScreenBounds(MouseDevice* device, BMessage* message)
+{
+	BRect frame;
+	if (device == NULL || message == NULL
+		|| message->FindRect("screen_bounds", &frame) != B_OK)
+		return B_BAD_VALUE;
+
+	// Absent on older app_server builds; normal orientation either way.
+	int32 orientation = B_PANEL_ORIENTATION_NORMAL;
+	message->FindInt32("screen_orientation", &orientation);
+
+	// Rescale only the first time this frame is seen (once per device call).
+	if (fCursorLock.Lock()) {
+		if (frame != fScreenFrame && fScreenFrame.IsValid()
+			&& fCursorPosition.x >= 0) {
+			fCursorPosition.x = fCursorPosition.x * frame.Width()
+				/ fScreenFrame.Width();
+			fCursorPosition.y = fCursorPosition.y * frame.Height()
+				/ fScreenFrame.Height();
+		}
+		fScreenFrame = frame;
+		fOrientation = orientation;
+		fCursorLock.Unlock();
+	}
+
+	device->UpdateScreenBounds(frame, orientation);
+	return B_OK;
 }
 
 

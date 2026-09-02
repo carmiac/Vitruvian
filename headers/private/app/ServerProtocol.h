@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2016, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -368,6 +369,10 @@ enum {
 	// New clipping: cumulative, transformed
 	AS_VIEW_CLIP_TO_RECT,
 	AS_VIEW_CLIP_TO_SHAPE,
+
+	// Appended at the end: inserting mid-enum renumbers later codes.
+	AS_SCREEN_SET_ROTATION,
+	AS_SCREEN_GET_ROTATION,
 
 	AS_LAST_CODE
 };

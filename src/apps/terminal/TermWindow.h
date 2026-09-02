@@ -69,6 +69,8 @@ public:
 
 protected:
 	virtual bool				QuitRequested();
+	virtual void				DispatchMessage(BMessage* message,
+									BHandler* handler);
 	virtual void				MessageReceived(BMessage* message);
 	virtual void				WindowActivated(bool activated);
 	virtual void				MenusBeginning();

@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2014 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -89,6 +90,8 @@ private:
 
 			BPopUpMenu*		fCombineMenu;
 			BMenuField*		fCombineField;
+			BPopUpMenu*		fRotationMenu;
+			BMenuField*		fRotationField;
 			BPopUpMenu*		fSwapDisplaysMenu;
 			BMenuField*		fSwapDisplaysField;
 			BPopUpMenu*		fUseLaptopPanelMenu;
@@ -112,6 +115,7 @@ private:
 			uint32			fOriginalWorkspacesColumns;
 			uint32			fOriginalWorkspacesRows;
 			float			fOriginalBrightness;
+			int32			fOriginalRotation;
 			bool			fModified;
 };
 

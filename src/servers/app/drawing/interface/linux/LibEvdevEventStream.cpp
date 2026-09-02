@@ -1,11 +1,12 @@
 /*
- * Copyright 2024, Dario Casalinuovo
+ * Copyright 2024-2026, Dario Casalinuovo
  * Distributed under the terms of the LGPL License.
  */
 
 #include "LibEvdevEventStream.h"
 
 #include "LinuxKeycodeMap.h"
+#include "PanelOrientationTransform.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -114,6 +115,26 @@ static const struct {
 };
 
 
+// Only for callers that pass orientation < 0, the constructor default;
+// DrmHWInterface passes its own. Mirrors _DiscoverPanelOrientation()'s
+// parsing, which is where VOS_PANEL_ORIENTATION reaches that path.
+static int32
+DiscoverOrientationFromEnv()
+{
+	const char* value = getenv("VOS_PANEL_ORIENTATION");
+	if (value == NULL)
+		return B_PANEL_ORIENTATION_NORMAL;
+
+	if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
+		return B_PANEL_ORIENTATION_UPSIDE_DOWN;
+	if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
+		return B_PANEL_ORIENTATION_LEFT_UP;
+	if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
+		return B_PANEL_ORIENTATION_RIGHT_UP;
+	return B_PANEL_ORIENTATION_NORMAL;
+}
+
+
 static uint32 MapMouseButton(uint32 linuxButton)
 {
 	switch (linuxButton) {
@@ -127,7 +148,8 @@ static uint32 MapMouseButton(uint32 linuxButton)
 }
 
 
-LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height, struct libseat* seat)
+LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height,
+	struct libseat* seat, int32 orientation)
 	:
 	fEventList(10),
 	fEventListLocker("evdev event list"),
@@ -136,6 +158,8 @@ LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height, struct lib
 	fLatestMouseMovedEvent(NULL),
 	fMousePosition(width / 2, height / 2),
 	fPendingMouseDelta(0, 0),
+	fLastAbsU(0.5f),
+	fLastAbsV(0.5f),
 	fMouseButtons(0),
 	fModifiers(0),
 	fOldModifiers(0),
@@ -147,6 +171,7 @@ LibEvdevEventStream::LibEvdevEventStream(uint32 width, uint32 height, struct lib
 	fSuspended(false),
 	fWidth(width),
 	fHeight(height),
+	fOrientation(orientation >= 0 ? orientation : DiscoverOrientationFromEnv()),
 	fSeat(seat),
 	fEpollFd(-1)
 {
@@ -302,8 +327,16 @@ LibEvdevEventStream::_CloseDevice(EvdevDevice& dev)
 void
 LibEvdevEventStream::UpdateScreenBounds(BRect bounds)
 {
+	UpdateScreenBounds(bounds, fOrientation);
+}
+
+
+void
+LibEvdevEventStream::UpdateScreenBounds(BRect bounds, int32 orientation)
+{
 	fWidth = bounds.IntegerWidth() + 1;
 	fHeight = bounds.IntegerHeight() + 1;
+	fOrientation = orientation;
 }
 
 
@@ -505,6 +538,14 @@ LibEvdevEventStream::_ProcessKeyEvent(EvdevDevice& dev, struct input_event& ev)
 
 
 void
+LibEvdevEventStream::_RotateDelta(float dx, float dy, float& outDx,
+	float& outDy) const
+{
+	rotate_panel_delta(fOrientation, dx, dy, outDx, outDy);
+}
+
+
+void
 LibEvdevEventStream::_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev)
 {
 	switch (ev.code) {
@@ -521,9 +562,13 @@ LibEvdevEventStream::_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev)
 		case REL_WHEEL:
 		case REL_WHEEL_HI_RES:
 		{
-			BMessage* event = new BMessage(B_MOUSE_WHEEL_CHANGED);
 			float delta = ev.code == REL_WHEEL_HI_RES ? ev.value / 120.0f : (float)ev.value;
-			event->AddFloat("be:wheel_delta_y", -delta);
+			float wx, wy;
+			_RotateDelta(0.0f, -delta, wx, wy);
+
+			BMessage* event = new BMessage(B_MOUSE_WHEEL_CHANGED);
+			event->AddFloat("be:wheel_delta_x", wx);
+			event->AddFloat("be:wheel_delta_y", wy);
 			event->AddInt64("when", system_time());
 
 			BAutolock lock(fEventListLocker);
@@ -539,9 +584,13 @@ LibEvdevEventStream::_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev)
 		case REL_HWHEEL:
 		case REL_HWHEEL_HI_RES:
 		{
-			BMessage* event = new BMessage(B_MOUSE_WHEEL_CHANGED);
 			float delta = ev.code == REL_HWHEEL_HI_RES ? ev.value / 120.0f : (float)ev.value;
-			event->AddFloat("be:wheel_delta_x", delta);
+			float wx, wy;
+			_RotateDelta(delta, 0.0f, wx, wy);
+
+			BMessage* event = new BMessage(B_MOUSE_WHEEL_CHANGED);
+			event->AddFloat("be:wheel_delta_x", wx);
+			event->AddFloat("be:wheel_delta_y", wy);
 			event->AddInt64("when", system_time());
 
 			BAutolock lock(fEventListLocker);
@@ -560,14 +609,21 @@ LibEvdevEventStream::_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev)
 void
 LibEvdevEventStream::_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev)
 {
-	// Handle absolute positioning (touchpad in absolute mode, touch screens)
+	// Handle absolute positioning (touchpad in absolute mode, touch screens).
+	// ABS_X/ABS_Y arrive as separate events, so each rotates the pair using
+	// the other axis' last known normalized value.
 	switch (ev.code) {
 		case ABS_X:
 		{
 			int min = libevdev_get_abs_minimum(dev.evdev, ABS_X);
 			int max = libevdev_get_abs_maximum(dev.evdev, ABS_X);
 			if (max > min) {
-				fMousePosition.x = (float)(ev.value - min) / (max - min) * fWidth;
+				fLastAbsU = (float)(ev.value - min) / (max - min);
+				float outU, outV;
+				rotate_panel_point(fOrientation, fLastAbsU, fLastAbsV,
+					outU, outV);
+				fMousePosition.x = outU * fWidth;
+				fMousePosition.y = outV * fHeight;
 				fMouseMoved = true;
 			}
 			break;
@@ -578,7 +634,12 @@ LibEvdevEventStream::_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev)
 			int min = libevdev_get_abs_minimum(dev.evdev, ABS_Y);
 			int max = libevdev_get_abs_maximum(dev.evdev, ABS_Y);
 			if (max > min) {
-				fMousePosition.y = (float)(ev.value - min) / (max - min) * fHeight;
+				fLastAbsV = (float)(ev.value - min) / (max - min);
+				float outU, outV;
+				rotate_panel_point(fOrientation, fLastAbsU, fLastAbsV,
+					outU, outV);
+				fMousePosition.x = outU * fWidth;
+				fMousePosition.y = outV * fHeight;
 				fMouseMoved = true;
 			}
 			break;
@@ -614,8 +675,11 @@ LibEvdevEventStream::_FlushPendingEvents()
 	if (fMouseMoved) {
 		// Apply pending delta for relative motion
 		if (fPendingMouseDelta.x != 0 || fPendingMouseDelta.y != 0) {
-			fMousePosition.x += fPendingMouseDelta.x;
-			fMousePosition.y += fPendingMouseDelta.y;
+			float dx, dy;
+			_RotateDelta(fPendingMouseDelta.x,
+				fPendingMouseDelta.y, dx, dy);
+			fMousePosition.x += dx;
+			fMousePosition.y += dy;
 
 			fMousePosition.x = clamp_constref(fMousePosition.x, 0.0f, (float)(fWidth - 1));
 			fMousePosition.y = clamp_constref(fMousePosition.y, 0.0f, (float)(fHeight - 1));

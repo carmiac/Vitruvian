@@ -17,15 +17,22 @@
 #include <String.h>
 
 
+class BBitmap;
+
+
 class LanguageListItem : public BStringItem {
 public:
 								LanguageListItem(const char* text,
-									const char* id, const char* languageCode);
+									const char* id, const char* languageCode,
+									const char* countryCode = NULL);
 								LanguageListItem(
 									const LanguageListItem& other);
+	virtual						~LanguageListItem();
 
 			const BString&		ID() const { return fID; }
 			const BString&		Code() const { return fCode; }
+
+	virtual void				Update(BView* owner, const BFont* font);
 
 	virtual	void				DrawItem(BView* owner, BRect frame,
 									bool complete = false);
@@ -38,24 +45,6 @@ protected:
 private:
 			BString				fID;
 			BString				fCode;
-};
-
-
-class LanguageListItemWithFlag : public LanguageListItem {
-public:
-								LanguageListItemWithFlag(const char* text,
-									const char* id, const char* languageCode,
-									const char* countryCode = NULL);
-								LanguageListItemWithFlag(
-									const LanguageListItemWithFlag& other);
-	virtual						~LanguageListItemWithFlag();
-
-	virtual void				Update(BView* owner, const BFont* font);
-
-	virtual	void				DrawItem(BView* owner, BRect frame,
-									bool complete = false);
-
-private:
 			BString				fCountryCode;
 			BBitmap*			fIcon;
 };

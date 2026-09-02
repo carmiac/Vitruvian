@@ -4,5 +4,3 @@
 add_subdirectory(keyboard)
 add_subdirectory(mouse)
 #add_subdirectory(virtualkeyboard)
-# libinput_device is now merged into the mouse add-on; build disabled
-# add_subdirectory(libinput_device)

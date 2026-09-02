@@ -12,6 +12,8 @@
 
 #include <ctype.h>
 
+#include <algorithm>
+
 #include <CardLayout.h>
 #include <CardView.h>
 #include <Catalog.h>
@@ -183,6 +185,28 @@ InputWindow::FindDevice()
 }
 
 
+void
+InputWindow::FitListToLabels()
+{
+	// The window is not resizable and the scroll view has no horizontal
+	// scrollbar, so a label wider than this is simply lost.
+	float widest = 0;
+	for (int32 i = 0; i < fDeviceListView->CountItems(); i++) {
+		DeviceListItemView* item = dynamic_cast<DeviceListItemView*>(
+			fDeviceListView->ItemAt(i));
+		if (item != NULL) {
+			widest = std::max(widest,
+				fDeviceListView->StringWidth(item->Label()));
+		}
+	}
+
+	float limit = fDeviceListView->StringWidth("M") * 30;
+	fDeviceListView->SetExplicitMinSize(
+		BSize(be_control_look->ComposeIconSize(32).Width()
+			+ std::min(widest, limit), B_SIZE_UNSET));
+}
+
+
 // Drops vid:pid token from i2c-HID device names ("ASUE140D:00 04F3:31B9 Mouse" -> "ASUE140D:00 Mouse")
 // ACPI HID stays (distinguishes devices on same controller)
 static BString
@@ -220,6 +244,63 @@ tidy_device_name(const BString& raw)
 }
 
 
+// Strips a trailing " <n>" appended by UniqueDisplayName(), so that a name
+// already numbered still compares equal to the bare hardware name.
+static BString
+strip_ordinal(const BString& label)
+{
+	int32 space = label.FindLast(' ');
+	if (space <= 0 || space == label.Length() - 1)
+		return label;
+
+	for (int32 i = space + 1; i < label.Length(); i++) {
+		if (!isdigit((unsigned char)label[i]))
+			return label;
+	}
+
+	BString base;
+	label.CopyInto(base, 0, space);
+
+	return base;
+}
+
+
+BString
+InputWindow::UniqueDisplayName(const BString& name)
+{
+	// Two ports of one model share a hardware name; number the rows and
+	// renumber the first the moment a second one shows up.
+	int32 count = 0;
+	DeviceListItemView* first = NULL;
+
+	for (int32 i = 0; i < fDeviceListView->CountItems(); i++) {
+		DeviceListItemView* item = dynamic_cast<DeviceListItemView*>(
+			fDeviceListView->ItemAt(i));
+		if (item == NULL || strip_ordinal(item->Label()) != name)
+			continue;
+
+		if (first == NULL)
+			first = item;
+		count++;
+	}
+
+	if (count == 0)
+		return name;
+
+	if (count == 1 && first != NULL) {
+		BString renamed(name);
+		renamed << " 1";
+		first->SetLabel(renamed);
+		fDeviceListView->InvalidateItem(fDeviceListView->IndexOf(first));
+	}
+
+	BString unique(name);
+	unique << ' ' << (count + 1);
+
+	return unique;
+}
+
+
 void
 InputWindow::AddDevice(BInputDevice* dev)
 {
@@ -238,9 +319,39 @@ InputWindow::AddDevice(BInputDevice* dev)
 		}
 	}
 
-	// The list gets the tidied form; the device's own view shows the full
-	// hardware name at the top.
-	BString displayName = tidy_device_name(hardwareName);
+	// hwdb's product name first, then the hardware's own name; udev's role
+	// is only a last resort, for a device whose name is pure identifiers.
+	BString displayName;
+	BString model;
+	int32 role = UDEV_ROLE_UNKNOWN;
+	if (description.FindString("short_description", &model) == B_OK
+		&& !model.IsEmpty()) {
+		displayName = model;
+	} else
+		displayName = tidy_device_name(hardwareName);
+
+	if (displayName.IsEmpty() && description.FindInt32("role", &role)
+			== B_OK) {
+		switch (role) {
+			case UDEV_ROLE_KEYBOARD:
+				displayName = B_TRANSLATE("Keyboard");
+				break;
+			case UDEV_ROLE_MOUSE:
+				displayName = B_TRANSLATE("Mouse");
+				break;
+			case UDEV_ROLE_TOUCHPAD:
+				displayName = B_TRANSLATE("Touchpad");
+				break;
+			case UDEV_ROLE_TABLET:
+				displayName = B_TRANSLATE("Tablet");
+				break;
+		}
+	}
+
+	if (displayName.IsEmpty())
+		displayName = hardwareName;
+
+	displayName = UniqueDisplayName(displayName);
 
 	if (dev->Type() == B_POINTING_DEVICE && name.FindFirst("Touchpad") >= 0) {
 		TouchpadPrefView* view = new TouchpadPrefView(dev,
@@ -270,4 +381,6 @@ InputWindow::AddDevice(BInputDevice* dev)
 		fDeviceListView->AddItem(keyboard);
 	} else
 		delete dev;
+
+	FitListToLabels();
 }

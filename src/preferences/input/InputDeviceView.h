@@ -43,6 +43,7 @@ public:
 						bool complete = false);
 
 	const char*			Label() { return fTitle.String();}
+	void				SetLabel(const BString& title) { fTitle = title; }
 	const char*			DeviceName() { return fIdentity.String();}
 
 

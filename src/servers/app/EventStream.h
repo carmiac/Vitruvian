@@ -1,5 +1,6 @@
 /*
  * Copyright 2005, Haiku, Inc. All Rights Reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -28,6 +29,10 @@ class EventStream {
 		virtual bool SupportsCursorThread() const;
 
 		virtual void UpdateScreenBounds(BRect bounds) = 0;
+		// orientation: 0..3, matching DRM_MODE_PANEL_ORIENTATION_*. Not
+		// pure, so backends that don't care about rotation need no change.
+		virtual void UpdateScreenBounds(BRect bounds, int32 orientation)
+				{ UpdateScreenBounds(bounds); }
 
 		virtual bool GetNextEvent(BMessage** _event) = 0;
 		virtual status_t GetNextCursorPosition(BPoint& where,
@@ -57,6 +62,7 @@ class InputServerStream : public EventStream {
 		virtual bool SupportsCursorThread() const { return fCursorSemaphore >= B_OK; }
 
 		virtual void UpdateScreenBounds(BRect bounds);
+		virtual void UpdateScreenBounds(BRect bounds, int32 orientation);
 
 		virtual bool GetNextEvent(BMessage** _event);
 		virtual status_t GetNextCursorPosition(BPoint& where,

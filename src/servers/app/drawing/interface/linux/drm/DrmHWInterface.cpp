@@ -60,6 +60,9 @@ DrmHWInterface::DrmHWInterface()
 	fInitialized(false),
 	fRunning(false),
 	fEventThread(-1),
+	fResizeThread(-1),
+	fResizeBusy(false),
+	fResizePending(false),
 	fSessionSem(create_sem(0, "drm session sem")),
 	fUdev(NULL),
 	fUdevMonitor(NULL),
@@ -78,13 +81,15 @@ DrmHWInterface::DrmHWInterface()
 	fAtomicSupported(false),
 	fPrimaryPlaneId(0),
 	fCursorPlaneId(0),
+	fCursorUsesAtomic(false),
 	fModeBlobId(0),
 	fPlaneProps{},
 	fCursorPlaneProps{},
 	fCrtcProps{},
 	fConnProps{},
 	fVRRSupported(false),
-	fVRREnabled(false)
+	fVRREnabled(false),
+	fPanelOrientation(PANEL_ORIENTATION_NORMAL)
 {
 	pthread_mutex_init(&fDirtyMutex, NULL);
 
@@ -163,6 +168,10 @@ DrmHWInterface::_OnSessionEnable()
 
 		_RestoreDisplay();
 
+		// Re-arm the plane _OnSessionDisable() cleared, from last known state.
+		if (fHardwareCursorEnabled && fCursor.IsSet())
+			SetCursor(fCursor);
+
 		LockExclusiveAccess();
 		Invalidate(BRect(0, 0, fDisplayMode.virtual_width - 1,
 				fDisplayMode.virtual_height - 1));
@@ -195,6 +204,11 @@ DrmHWInterface::_OnSessionEnable()
 		libseat_close_device(fSeat, fDeviceId);
 		return;
 	}
+
+	// Needed before any buffer is sized below, since fRenderBuffer must be
+	// allocated at logical (post-swap) dimensions, not the panel's physical
+	// mode.
+	_DiscoverPanelOrientation();
 
 	// Save current CRTC state for restoration on exit
 	struct modeset_dev *iter;
@@ -230,7 +244,9 @@ DrmHWInterface::_OnSessionEnable()
 			"single-buffered with tearing\n");
 	}
 
-	fRenderBuffer = new MallocBuffer(get_dev()->width, get_dev()->height);
+	uint32_t logW, logH;
+	_ApplyOrientationSwap(get_dev()->width, get_dev()->height, logW, logH);
+	fRenderBuffer = new MallocBuffer(logW, logH);
 
 	_ProbeAtomic();
 	if (fAtomicSupported)
@@ -283,30 +299,11 @@ DrmHWInterface::_OnSessionEnable()
 	}
 
 	struct modeset_dev* initDev = get_dev();
-	fDisplayMode.virtual_width = initDev->width;
-	fDisplayMode.virtual_height = initDev->height;
-	fDisplayMode.space = B_RGB32;
-
-	drmModeModeInfo& m = initDev->mode;
-	fDisplayMode.timing.pixel_clock  = m.clock;
-	fDisplayMode.timing.h_display    = m.hdisplay;
-	fDisplayMode.timing.h_sync_start = m.hsync_start;
-	fDisplayMode.timing.h_sync_end   = m.hsync_end;
-	fDisplayMode.timing.h_total      = m.htotal;
-	fDisplayMode.timing.v_display    = m.vdisplay;
-	fDisplayMode.timing.v_sync_start = m.vsync_start;
-	fDisplayMode.timing.v_sync_end   = m.vsync_end;
-	fDisplayMode.timing.v_total      = m.vtotal;
-	fDisplayMode.timing.flags = 0;
-	if (m.flags & DRM_MODE_FLAG_PHSYNC)
-		fDisplayMode.timing.flags |= B_POSITIVE_HSYNC;
-	if (m.flags & DRM_MODE_FLAG_PVSYNC)
-		fDisplayMode.timing.flags |= B_POSITIVE_VSYNC;
-	if (m.flags & DRM_MODE_FLAG_INTERLACE)
-		fDisplayMode.timing.flags |= B_TIMING_INTERLACED;
-	fDisplayMode.h_display_start = 0;
-	fDisplayMode.v_display_start = 0;
-	fDisplayMode.flags = 0;
+	_FillModeInfo(fDisplayMode, initDev->mode);
+	uint32_t initLogW, initLogH;
+	_ApplyOrientationSwap(initDev->width, initDev->height, initLogW, initLogH);
+	fDisplayMode.virtual_width = initLogW;
+	fDisplayMode.virtual_height = initLogH;
 
 	fInitialized = true;
 	fSessionActive = true;
@@ -315,11 +312,9 @@ DrmHWInterface::_OnSessionEnable()
 
 
 void
-DrmHWInterface::_OnSessionDisable()
+DrmHWInterface::_DrainPendingFlip()
 {
-	printf("Session disabled\n");
-
-	// Drain before disabling session
+	// A flip already queued targets the buffer we're about to tear down.
 	for (int i = 0; i < 4 && fPageFlipPending; i++) {
 		struct pollfd pfd = { fFd, POLLIN, 0 };
 		if (poll(&pfd, 1, 16) > 0 && (pfd.revents & POLLIN)) {
@@ -331,6 +326,15 @@ DrmHWInterface::_OnSessionDisable()
 		} else
 			break;
 	}
+}
+
+
+void
+DrmHWInterface::_OnSessionDisable()
+{
+	printf("Session disabled\n");
+
+	_DrainPendingFlip();
 
 	fSessionActive = false;
 	fPageFlipPending = false;
@@ -340,6 +344,10 @@ DrmHWInterface::_OnSessionDisable()
 	fPreviousDirty.MakeEmpty();
 	fNeedsFlip = false;
 	pthread_mutex_unlock(&fDirtyMutex);
+
+	// Clear while still DRM master, or the next VT/session owner scans
+	// out our stale sprite.
+	_DisableHardwareCursor();
 
 	if (fFd >= 0)
 		drmDropMaster(fFd);
@@ -563,6 +571,16 @@ DrmHWInterface::~DrmHWInterface()
 {
 	CALLED();
 
+	// A resize in flight would tear down buffers under the teardown below.
+	if (fResizeThread >= 0) {
+		status_t exitValue;
+		wait_for_thread(fResizeThread, &exitValue);
+	}
+
+	// Clear while we can still be DRM master, or a leftover armed cursor
+	// keeps scanning out after we're gone (janus-shared fd case).
+	_DisableHardwareCursor();
+
 	// Janus-shared fd is a dup() of janus's open — dropping master here
 	// would revoke janus's too, and the non-root successor can't reacquire.
 	if (fFd >= 0 && fSessionActive.load()
@@ -589,17 +607,8 @@ DrmHWInterface::~DrmHWInterface()
 
 	delete_sem(fSessionSem);
 
-	if (fFd >= 0 && fPageFlipPending) {
-		drmEventContext evctx = {
-			.version           = DRM_EVENT_CONTEXT_VERSION,
-			.page_flip_handler = DrmHWInterface::_PageFlipHandler,
-		};
-		struct pollfd pfd = { fFd, POLLIN, 0 };
-		for (int i = 0; i < 4 && fPageFlipPending; i++) {
-			if (poll(&pfd, 1, 16) > 0 && (pfd.revents & POLLIN))
-				drmHandleEvent(fFd, &evctx);
-		}
-	}
+	if (fFd >= 0)
+		_DrainPendingFlip();
 
 	if (fUdevMonitor)
 		udev_monitor_unref(fUdevMonitor);
@@ -678,7 +687,8 @@ DrmHWInterface::CreateEventStream()
 		return NULL;
 	uint32 w = fDisplayMode.virtual_width  > 0 ? fDisplayMode.virtual_width  : 1920;
 	uint32 h = fDisplayMode.virtual_height > 0 ? fDisplayMode.virtual_height : 1080;
-	LibEvdevEventStream* s = new (std::nothrow) LibEvdevEventStream(w, h, fSeat);
+	LibEvdevEventStream* s = new (std::nothrow) LibEvdevEventStream(w, h,
+		fSeat, fPanelOrientation);
 	if (s == NULL)
 		return NULL;
 	if (!s->IsValid()) {
@@ -719,6 +729,12 @@ DrmHWInterface::SetMode(const display_mode& mode)
 
 	drmModeModeInfo* found = NULL;
 
+	// mode.virtual_width/height is the caller's logical (post-rotation)
+	// request; the connector only ever advertises physical panel modes.
+	uint32_t physW, physH;
+	_ApplyOrientationSwap(mode.virtual_width, mode.virtual_height,
+		physW, physH);
+
 	float targetRefresh = 0;
 	if (mode.timing.h_total > 0 && mode.timing.v_total > 0) {
 		targetRefresh = float(mode.timing.pixel_clock * 1000)
@@ -728,8 +744,8 @@ DrmHWInterface::SetMode(const display_mode& mode)
 	if (targetRefresh > 0) {
 		float bestDiff = 999;
 		for (int i = 0; i < conn->count_modes; i++) {
-			if (conn->modes[i].hdisplay != mode.virtual_width ||
-			    conn->modes[i].vdisplay != mode.virtual_height)
+			if (conn->modes[i].hdisplay != physW ||
+			    conn->modes[i].vdisplay != physH)
 				continue;
 			float modeRefresh = float(conn->modes[i].clock * 1000)
 				/ float(conn->modes[i].htotal * conn->modes[i].vtotal);
@@ -741,8 +757,8 @@ DrmHWInterface::SetMode(const display_mode& mode)
 		}
 	} else {
 		for (int i = 0; i < conn->count_modes; i++) {
-			if (conn->modes[i].hdisplay == mode.virtual_width &&
-			    conn->modes[i].vdisplay == mode.virtual_height) {
+			if (conn->modes[i].hdisplay == physW &&
+			    conn->modes[i].vdisplay == physH) {
 				found = &conn->modes[i];
 				break;
 			}
@@ -754,6 +770,8 @@ DrmHWInterface::SetMode(const display_mode& mode)
 		UnlockExclusiveAccess();
 		return B_BAD_VALUE;
 	}
+
+	_DrainPendingFlip();
 
 	delete fFrontBuffer; fFrontBuffer = NULL;
 	delete fBackBuffer;  fBackBuffer  = NULL;
@@ -801,7 +819,9 @@ DrmHWInterface::SetMode(const display_mode& mode)
 			"single-buffered with tearing\n");
 	}
 
-	fRenderBuffer = new MallocBuffer(dev->width, dev->height);
+	uint32_t logW, logH;
+	_ApplyOrientationSwap(dev->width, dev->height, logW, logH);
+	fRenderBuffer = new MallocBuffer(logW, logH);
 
 	int ret;
 	if (fAtomicSupported && fPrimaryPlaneId) {
@@ -819,35 +839,58 @@ DrmHWInterface::SetMode(const display_mode& mode)
 		}
 	}
 
-	fDisplayMode.virtual_width  = dev->width;
-	fDisplayMode.virtual_height = dev->height;
-	fDisplayMode.space = B_RGB32;
+	_FillModeInfo(fDisplayMode, dev->mode);
+	fDisplayMode.virtual_width  = logW;
+	fDisplayMode.virtual_height = logH;
 
-	drmModeModeInfo& m = dev->mode;
-	fDisplayMode.timing.pixel_clock  = m.clock;
-	fDisplayMode.timing.h_display    = m.hdisplay;
-	fDisplayMode.timing.h_sync_start = m.hsync_start;
-	fDisplayMode.timing.h_sync_end   = m.hsync_end;
-	fDisplayMode.timing.h_total      = m.htotal;
-	fDisplayMode.timing.v_display    = m.vdisplay;
-	fDisplayMode.timing.v_sync_start = m.vsync_start;
-	fDisplayMode.timing.v_sync_end   = m.vsync_end;
-	fDisplayMode.timing.v_total      = m.vtotal;
-	fDisplayMode.timing.flags = 0;
-	if (m.flags & DRM_MODE_FLAG_PHSYNC)
-		fDisplayMode.timing.flags |= B_POSITIVE_HSYNC;
-	if (m.flags & DRM_MODE_FLAG_PVSYNC)
-		fDisplayMode.timing.flags |= B_POSITIVE_VSYNC;
-	if (m.flags & DRM_MODE_FLAG_INTERLACE)
-		fDisplayMode.timing.flags |= B_TIMING_INTERLACED;
-	fDisplayMode.h_display_start = 0;
-	fDisplayMode.v_display_start = 0;
-	fDisplayMode.flags = 0;
+	// A shrink can leave the last cursor position outside the new CRTC;
+	// clamp before re-arming the hardware plane at the old coordinates.
+	// fCursorLocation is logical, so clamp against the logical mode, not
+	// dev->width/height (physical). Guarded on fCursor alone: SetCursor()
+	// now decides hardware vs. software, so it must always run to flip
+	// the sprite back on after a return from a rotated orientation.
+	if (fCursor.IsSet()) {
+		if (fCursorLocation.x > fDisplayMode.virtual_width - 1)
+			fCursorLocation.x = fDisplayMode.virtual_width - 1;
+		if (fCursorLocation.y > fDisplayMode.virtual_height - 1)
+			fCursorLocation.y = fDisplayMode.virtual_height - 1;
+		if (fCursorLocation.x < 0)
+			fCursorLocation.x = 0;
+		if (fCursorLocation.y < 0)
+			fCursorLocation.y = 0;
+		SetCursor(fCursor);
+	}
 
 	_NotifyFrameBufferChanged();
 
 	UnlockExclusiveAccess();
 	return B_OK;
+}
+
+
+void
+DrmHWInterface::_FillModeInfo(display_mode& mode, const drmModeModeInfo& m)
+{
+	mode.space = B_RGB32;
+	mode.timing.pixel_clock  = m.clock;
+	mode.timing.h_display    = m.hdisplay;
+	mode.timing.h_sync_start = m.hsync_start;
+	mode.timing.h_sync_end   = m.hsync_end;
+	mode.timing.h_total      = m.htotal;
+	mode.timing.v_display    = m.vdisplay;
+	mode.timing.v_sync_start = m.vsync_start;
+	mode.timing.v_sync_end   = m.vsync_end;
+	mode.timing.v_total      = m.vtotal;
+	mode.timing.flags = 0;
+	if (m.flags & DRM_MODE_FLAG_PHSYNC)
+		mode.timing.flags |= B_POSITIVE_HSYNC;
+	if (m.flags & DRM_MODE_FLAG_PVSYNC)
+		mode.timing.flags |= B_POSITIVE_VSYNC;
+	if (m.flags & DRM_MODE_FLAG_INTERLACE)
+		mode.timing.flags |= B_TIMING_INTERLACED;
+	mode.h_display_start = 0;
+	mode.v_display_start = 0;
+	mode.flags = 0;
 }
 
 
@@ -863,7 +906,28 @@ status_t
 DrmHWInterface::GetPreferredMode(display_mode* mode)
 {
 	CALLED();
-	*mode = fDisplayMode;
+
+	struct modeset_dev* dev = get_dev();
+	drmModeConnector* conn = (dev != NULL && fFd >= 0)
+		? drmModeGetConnector(fFd, dev->conn) : NULL;
+	const drmModeModeInfo* picked
+		= conn != NULL ? modeset_pick_mode(fFd, conn) : NULL;
+
+	if (picked == NULL) {
+		if (conn != NULL)
+			drmModeFreeConnector(conn);
+		*mode = fDisplayMode;
+		return B_OK;
+	}
+
+	drmModeModeInfo m = *picked;
+	drmModeFreeConnector(conn);
+
+	_FillModeInfo(*mode, m);
+	uint32_t logW, logH;
+	_ApplyOrientationSwap(m.hdisplay, m.vdisplay, logW, logH);
+	mode->virtual_width  = logW;
+	mode->virtual_height = logH;
 	return B_OK;
 }
 
@@ -872,7 +936,51 @@ status_t
 DrmHWInterface::GetDeviceInfo(accelerant_device_info* info)
 {
 	CALLED();
-	return B_UNSUPPORTED;
+
+	if (info == NULL)
+		return B_BAD_VALUE;
+	if (fFd < 0)
+		return B_NO_INIT;
+
+	memset(info, 0, sizeof(*info));
+	info->version = B_ACCELERANT_VERSION;
+
+	// The driver name is the closest thing DRM has to a chipset: there is
+	// no accelerant here to ask.
+	drmVersionPtr version = drmGetVersion(fFd);
+	if (version != NULL) {
+		if (version->name != NULL)
+			strlcpy(info->chipset, version->name, sizeof(info->chipset));
+		if (version->desc != NULL)
+			strlcpy(info->name, version->desc, sizeof(info->name));
+		drmFreeVersion(version);
+	}
+
+	// A driver description is generic ("AMD GPU"), so prefer the product
+	// name hwdb resolves for the card's PCI parent when there is one.
+	struct stat st;
+	if (fUdev != NULL && fstat(fFd, &st) == 0) {
+		struct udev_device* dev
+			= udev_device_new_from_devnum(fUdev, 'c', st.st_rdev);
+		if (dev != NULL) {
+			struct udev_device* pci
+				= udev_device_get_parent_with_subsystem_devtype(dev, "pci",
+					NULL);
+			const char* model = pci != NULL
+				? udev_device_get_property_value(pci,
+					"ID_MODEL_FROM_DATABASE")
+				: NULL;
+			if (model != NULL && model[0] != '\0')
+				strlcpy(info->name, model, sizeof(info->name));
+			// pci is owned by dev; unreferencing dev covers both.
+			udev_device_unref(dev);
+		}
+	}
+
+	if (info->name[0] == '\0' && info->chipset[0] == '\0')
+		return B_UNSUPPORTED;
+
+	return B_OK;
 }
 
 
@@ -934,8 +1042,10 @@ DrmHWInterface::GetModeList(display_mode** _modeList, uint32* _count)
 			dm.timing.flags |= B_TIMING_INTERLACED;
 
 		dm.space        = B_RGB32;
-		dm.virtual_width  = m.hdisplay;
-		dm.virtual_height = m.vdisplay;
+		uint32_t logW, logH;
+		_ApplyOrientationSwap(m.hdisplay, m.vdisplay, logW, logH);
+		dm.virtual_width  = logW;
+		dm.virtual_height = logH;
 		dm.h_display_start = 0;
 		dm.v_display_start = 0;
 		dm.flags = 0;
@@ -1226,6 +1336,42 @@ DrmHWInterface::IsDoubleBuffered() const
 }
 
 
+namespace {
+
+// The one place the rotation direction convention lives. Logical (lx, ly)
+// is a pixel index into a logicalW x logicalH buffer; the result is the
+// corresponding pixel index into the (swapped, for 90/270) physical buffer.
+// Cross-checked against libweston/backend-drm (modes.c's
+// get_panel_orientation() + shared/matrix.c's weston_matrix_init_transform()):
+// LEFT_UP is a 90 degree CCW content rotation, RIGHT_UP a 270 degree CCW
+// (= 90 CW) rotation. If this ships mirrored, flip the two cases below.
+inline void
+rotate_point(PanelOrientation orientation, int32 lx, int32 ly,
+	int32 logicalW, int32 logicalH, int32& px, int32& py)
+{
+	switch (orientation) {
+		case PANEL_ORIENTATION_UPSIDE_DOWN:
+			px = logicalW - 1 - lx;
+			py = logicalH - 1 - ly;
+			break;
+		case PANEL_ORIENTATION_LEFT_UP:
+			px = ly;
+			py = logicalW - 1 - lx;
+			break;
+		case PANEL_ORIENTATION_RIGHT_UP:
+			px = logicalH - 1 - ly;
+			py = lx;
+			break;
+		default:
+			px = lx;
+			py = ly;
+			break;
+	}
+}
+
+}	// namespace
+
+
 void
 DrmHWInterface::_BlitRect(RenderingBuffer* src, RenderingBuffer* dst,
 	const BRect& frame)
@@ -1234,17 +1380,60 @@ DrmHWInterface::_BlitRect(RenderingBuffer* src, RenderingBuffer* dst,
 	int32 w = (int32)(frame.right - frame.left + 1);
 	int32 h = (int32)(frame.bottom - frame.top + 1);
 
-	int32 bufW = (int32)dst->Width(), bufH = (int32)dst->Height();
+	int32 srcW = (int32)src->Width(), srcH = (int32)src->Height();
 	if (x < 0) { w += x; x = 0; }
 	if (y < 0) { h += y; y = 0; }
+	if (x + w > srcW) w = srcW - x;
+	if (y + h > srcH) h = srcH - y;
+	if (w <= 0 || h <= 0)
+		return;
+
+	uint32 srcBpr = src->BytesPerRow(), dstBpr = dst->BytesPerRow();
+	uint8* srcBase = (uint8*)src->Bits();
+	uint8* dstBase = (uint8*)dst->Bits();
+
+	if (fPanelOrientation == PANEL_ORIENTATION_LEFT_UP
+			|| fPanelOrientation == PANEL_ORIENTATION_RIGHT_UP) {
+		// Axis-swapped: no long contiguous run on both sides at once, so
+		// AVX2 streaming stores don't apply here. Scalar per-pixel.
+		if ((int32)dst->Width() != srcH || (int32)dst->Height() != srcW)
+			return;
+		for (int32 sy = y; sy < y + h; sy++) {
+			const uint8* srow = srcBase + sy * srcBpr + x * 4;
+			for (int32 sx = x; sx < x + w; sx++, srow += 4) {
+				int32 px, py;
+				rotate_point(fPanelOrientation, sx, sy, srcW, srcH, px, py);
+				memcpy(dstBase + py * dstBpr + px * 4, srow, 4);
+			}
+		}
+		return;
+	}
+
+	if (fPanelOrientation == PANEL_ORIENTATION_UPSIDE_DOWN) {
+		// No axis swap for 180, so each row stays contiguous and only
+		// runs backwards. rotate_point() still places its start, to keep
+		// the direction convention in one place.
+		if ((int32)dst->Width() != srcW || (int32)dst->Height() != srcH)
+			return;
+		for (int32 sy = y; sy < y + h; sy++) {
+			const uint8* srow = srcBase + sy * srcBpr + x * 4;
+			int32 dx, dy;
+			rotate_point(fPanelOrientation, x, sy, srcW, srcH, dx, dy);
+			uint8* drow = dstBase + dy * dstBpr + dx * 4;
+			for (int32 sx = 0; sx < w; sx++, srow += 4, drow -= 4)
+				memcpy(drow, srow, 4);
+		}
+		return;
+	}
+
+	int32 bufW = (int32)dst->Width(), bufH = (int32)dst->Height();
 	if (x + w > bufW) w = bufW - x;
 	if (y + h > bufH) h = bufH - y;
 	if (w <= 0 || h <= 0)
 		return;
 
-	uint32 srcBpr = src->BytesPerRow(), dstBpr = dst->BytesPerRow();
-	uint8* s = (uint8*)src->Bits() + y * srcBpr + x * 4;
-	uint8* d = (uint8*)dst->Bits() + y * dstBpr + x * 4;
+	uint8* s = srcBase + y * srcBpr + x * 4;
+	uint8* d = dstBase + y * dstBpr + x * 4;
 	int32  bytes = w * 4;
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -1300,7 +1489,9 @@ DrmHWInterface::_BlendCursor(RenderingBuffer* srcBg, RenderingBuffer* dst,
 	if (!cf.IsValid() || !area.Intersects(cf))
 		return;
 
-	area = area & IntRect(dst->Bounds());
+	// srcBg and the cursor bitmap are logical; dst is the physical
+	// scanout, so clip against the logical bounds and rotate per pixel.
+	area = area & IntRect(srcBg->Bounds());
 	area = area & cf;
 	if (!area.IsValid())
 		return;
@@ -1313,26 +1504,51 @@ DrmHWInterface::_BlendCursor(RenderingBuffer* srcBg, RenderingBuffer* dst,
 	uint32 bgBPR = srcBg->BytesPerRow();
 	uint32 dBPR  = dst->BytesPerRow();
 	uint8* bg  = (uint8*)srcBg->Bits() + top * bgBPR + left * 4;
-	uint8* dpx = (uint8*)dst->Bits()   + top * dBPR  + left * 4;
+	uint8* dstBase = (uint8*)dst->Bits();
+	uint8* dpx = dstBase + top * dBPR + left * 4;
 
 	uint8* crs    = (uint8*)fCursorAndDragBitmap->Bits();
 	uint32 crsBPR = fCursorAndDragBitmap->BytesPerRow();
 	crs += (top - (int32)floorf(cf.top))   * crsBPR
 		 + (left - (int32)floorf(cf.left)) * 4;
 
+	if (fPanelOrientation == PANEL_ORIENTATION_NORMAL) {
+		for (int32 y = top; y <= bottom; y++) {
+			uint8* s = bg;
+			uint8* d = dpx;
+			uint8* c = crs;
+			for (int32 x = left; x <= right; x++) {
+				int a = 255 - c[3];
+				d[0] = (uint8)(((s[0] * a + 255) >> 8) + c[0]);
+				d[1] = (uint8)(((s[1] * a + 255) >> 8) + c[1]);
+				d[2] = (uint8)(((s[2] * a + 255) >> 8) + c[2]);
+				s += 4; d += 4; c += 4;
+			}
+			bg  += bgBPR;
+			dpx += dBPR;
+			crs += crsBPR;
+		}
+		return;
+	}
+
+	const int32 logicalW = fDisplayMode.virtual_width;
+	const int32 logicalH = fDisplayMode.virtual_height;
+
 	for (int32 y = top; y <= bottom; y++) {
 		uint8* s = bg;
-		uint8* d = dpx;
 		uint8* c = crs;
 		for (int32 x = left; x <= right; x++) {
+			int32 px, py;
+			rotate_point(fPanelOrientation, x, y, logicalW, logicalH,
+				px, py);
+			uint8* d = dstBase + py * dBPR + px * 4;
 			int a = 255 - c[3];
 			d[0] = (uint8)(((s[0] * a + 255) >> 8) + c[0]);
 			d[1] = (uint8)(((s[1] * a + 255) >> 8) + c[1]);
 			d[2] = (uint8)(((s[2] * a + 255) >> 8) + c[2]);
-			s += 4; d += 4; c += 4;
+			s += 4; c += 4;
 		}
 		bg  += bgBPR;
-		dpx += dBPR;
 		crs += crsBPR;
 	}
 }
@@ -1446,6 +1662,25 @@ DrmHWInterface::CopyBackToFront(const BRegion& region)
 
 
 void
+DrmHWInterface::_DisableHardwareCursor()
+{
+	if (fFd < 0)
+		return;
+
+	struct modeset_dev* dev = get_dev();
+	if (dev == NULL)
+		return;
+
+	// Legacy ioctl can return success without clearing the plane FB on
+	// atomic-capable drivers, so branch the same way the plane was armed.
+	if (fCursorUsesAtomic)
+		_AtomicSetCursor(0, 0, 0, 0, 0, 0);
+	else
+		drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+}
+
+
+void
 DrmHWInterface::SetCursor(ServerCursor* cursor)
 {
 	if (fDragBitmap.IsSet())
@@ -1458,12 +1693,27 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 		return;
 
 	if (cursor == NULL) {
-		if (dev->cursor_ok) {
-			drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
-			fHardwareCursorEnabled = false;
+		if (dev->cursor_ok)
+			_DisableHardwareCursor();
+		fHardwareCursorEnabled = false;
+		return;
+	}
+
+	if (!_HardwareCursorUsable()) {
+		// Arm a fully transparent sprite instead of a null one: on a
+		// virtualized host that was showing our sprite as its own window
+		// pointer, disabling it outright makes the host draw its default
+		// pointer on top of the one _BlendCursor() draws.
+		if (dev->cursor_handle != 0) {
+			fprintf(stderr, "DRM: cursor to software (orientation %d), "
+				"sprite armed transparent\n", (int)fPanelOrientation);
+			memset(dev->cursor_map, 0, dev->cursor_size);
+			drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
+				dev->cursor_w, dev->cursor_h);
 		} else {
-			fHardwareCursorEnabled = false;
+			_DisableHardwareCursor();
 		}
+		fHardwareCursorEnabled = false;
 		return;
 	}
 
@@ -1471,6 +1721,15 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 
 	int32 cw = std::min((int32)cursor->Bounds().IntegerWidth() + 1, 64);
 	int32 ch = std::min((int32)cursor->Bounds().IntegerHeight() + 1, 64);
+
+	// An empty or bogus bitmap would leave the sprite armed but fully
+	// transparent, which looks exactly like a cursor the host refuses to
+	// draw: it still tracks the pointer, invisibly.
+	if (cw <= 0 || ch <= 0 || cursor->Bits() == NULL) {
+		fprintf(stderr, "DRM: cursor bitmap unusable (%" B_PRId32 "x%"
+			B_PRId32 ", bits=%p), leaving sprite armed transparent\n",
+			cw, ch, cursor->Bits());
+	}
 	const uint8* src = (const uint8*)cursor->Bits();
 	uint8* dst = dev->cursor_map;
 	for (int32 row = 0; row < ch; row++) {
@@ -1482,7 +1741,7 @@ DrmHWInterface::SetCursor(ServerCursor* cursor)
 	const int32  py  = (int32)fCursorLocation.y - (int32)hot.y;
 
 	int ret;
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb) {
+	if (fCursorUsesAtomic) {
 		ret = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			px, py, 64, 64) == B_OK) ? 0 : -1;
 	} else {
@@ -1511,14 +1770,19 @@ DrmHWInterface::SetCursorVisible(bool visible)
 	HWInterface::SetCursorVisible(visible);
 
 	struct modeset_dev* dev = get_dev();
-	if (!dev || !dev->cursor_ok)
+	// fHardwareCursorEnabled, not just dev->cursor_ok: SetCursor() may
+	// have left a stale "ok" sprite armed-but-transparent for a rotated
+	// orientation, and this must not re-show it.
+	if (!dev || !dev->cursor_ok || !fHardwareCursorEnabled) {
+		if (dev != NULL && visible && !fHardwareCursorEnabled) {
+			fprintf(stderr, "DRM: SetCursorVisible(true) ignored, hardware "
+				"cursor is off\n");
+		}
 		return;
+	}
 
 	if (!visible) {
-		if (fAtomicSupported && fCursorPlaneId)
-			_AtomicSetCursor(0, 0, 0, 0, 0, 0);
-		else
-			drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+		_DisableHardwareCursor();
 	} else {
 		BPoint hot(0, 0);
 		if (fCursor.IsSet())
@@ -1526,14 +1790,20 @@ DrmHWInterface::SetCursorVisible(bool visible)
 		const int32 px = (int32)fCursorLocation.x - (int32)hot.x;
 		const int32 py = (int32)fCursorLocation.y - (int32)hot.y;
 
-		if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb)
-			_AtomicSetCursor(dev->cursor_fb, dev->crtc,
-				px, py, dev->cursor_w, dev->cursor_h);
-		else {
-			drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
+		// fHardwareCursorEnabled must track the actual result, or
+		// _DrawCursor() and the hardware plane both draw at once.
+		int ret;
+		if (fCursorUsesAtomic) {
+			ret = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
+				px, py, dev->cursor_w, dev->cursor_h) == B_OK) ? 0 : -1;
+		} else {
+			ret = drmModeSetCursor(fFd, dev->crtc, dev->cursor_handle,
 				dev->cursor_w, dev->cursor_h);
-			drmModeMoveCursor(fFd, dev->crtc, px, py);
+			if (ret == 0)
+				drmModeMoveCursor(fFd, dev->crtc, px, py);
 		}
+
+		fHardwareCursorEnabled = (ret == 0);
 	}
 }
 
@@ -1546,16 +1816,9 @@ DrmHWInterface::SetDragBitmap(const ServerBitmap* bitmap,
 
 	if (bitmap != NULL) {
 		// Disable the HW sprite before delegating to base so the
-		// software composite path owns the drag visual. Use the
-		// atomic path when supported — legacy drmModeSetCursor can
-		// return success without clearing the plane FB on atomic
-		// drivers (root cause of the "two cursors" symptom).
-		if (dev && dev->cursor_ok && fHardwareCursorEnabled) {
-			if (fAtomicSupported && fCursorPlaneId)
-				_AtomicSetCursor(0, 0, 0, 0, 0, 0);
-			else
-				drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
-		}
+		// software composite path owns the drag visual.
+		if (dev && dev->cursor_ok && fHardwareCursorEnabled)
+			_DisableHardwareCursor();
 		fHardwareCursorEnabled = false;
 		fCursorObscured = false;
 		fCursorVisible = true;
@@ -1600,11 +1863,12 @@ DrmHWInterface::MoveCursorTo(float x, float y)
 	const int32 px = (int32)floorf(x - hot.x);
 	const int32 py = (int32)floorf(y - hot.y);
 
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb)
+	if (fCursorUsesAtomic) {
 		_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			px, py, dev->cursor_w, dev->cursor_h);
-	else
+	} else {
 		drmModeMoveCursor(fFd, dev->crtc, px, py);
+	}
 
 	_PushCursorTrackDirty(oldPx, oldPy, px, py);
 }
@@ -1657,24 +1921,81 @@ DrmHWInterface::_HandleHotplug()
 	if (hotplug != NULL && strcmp(hotplug, "1") == 0 && fFd >= 0) {
 		fprintf(stderr, "DRM hotplug event\n");
 
+		// The uevent carries no CONNECTOR=, so every connector is
+		// rescanned; scope the resize reaction to the one we render to.
+		struct modeset_dev* primary = get_dev();
+		uint32_t primaryConn = primary != NULL ? primary->conn : 0;
+		bool resizePrimary = false;
+
 		drmModeRes* res = drmModeGetResources(fFd);
 		if (res) {
 			for (int i = 0; i < res->count_connectors; i++) {
 				drmModeConnector* conn = drmModeGetConnector(fFd,
 					res->connectors[i]);
 				if (conn) {
-					if (conn->connection == DRM_MODE_CONNECTED)
-						modeset_add_connector(fFd, conn->connector_id);
-					else
+					if (conn->connection == DRM_MODE_CONNECTED) {
+						int r = modeset_add_connector(fFd, conn->connector_id);
+						if (r == 1 && conn->connector_id == primaryConn)
+							resizePrimary = true;
+					} else
 						modeset_remove_connector(fFd, conn->connector_id);
 					drmModeFreeConnector(conn);
 				}
 			}
 			drmModeFreeResources(res);
 		}
+
+		// Not master while inactive (VT-switched away); applying a mode
+		// here would fail or steal master from whoever now owns it.
+		if (resizePrimary && fSessionActive.load())
+			_ScheduleResize();
 	}
 
 	udev_device_unref(dev);
+}
+
+
+void
+DrmHWInterface::_ScheduleResize()
+{
+	// Off the DRM event thread so SetMode() doesn't block flip servicing;
+	// don't join a resize already running, hand it the newer geometry instead.
+	fResizePending.store(true);
+	if (fResizeBusy.exchange(true))
+		return;
+
+	fResizeThread = spawn_thread(_ResizeThreadEntry, "drm resize",
+		B_NORMAL_PRIORITY, this);
+	if (fResizeThread >= 0)
+		resume_thread(fResizeThread);
+	else
+		fResizeBusy.store(false);
+}
+
+
+int32
+DrmHWInterface::_ResizeThreadEntry(void* data)
+{
+	static_cast<DrmHWInterface*>(data)->_ApplyResize();
+	return 0;
+}
+
+
+void
+DrmHWInterface::_ApplyResize()
+{
+	while (fResizePending.exchange(false)) {
+		display_mode mode;
+		if (GetPreferredMode(&mode) != B_OK)
+			break;
+
+		// SetMode() itself must stay silent; app-initiated callers already
+		// trigger Desktop's own _ScreenChanged().
+		if (SetMode(mode) == B_OK)
+			_NotifyScreenChanged();
+	}
+
+	fResizeBusy.store(false);
 }
 
 
@@ -1726,33 +2047,47 @@ void
 DrmHWInterface::_ProbeCursor()
 {
 	struct modeset_dev* dev = get_dev();
-	if (dev == NULL || dev->cursor_handle == 0)
-		return;
-
-	int r = drmModeSetCursor(fFd, dev->crtc,
-		dev->cursor_handle, dev->cursor_w, dev->cursor_h);
-	if (r == 0) {
-		fHardwareCursorEnabled = true;
-		drmModeSetCursor(fFd, dev->crtc, 0, 0, 0);
+	if (dev == NULL || dev->cursor_handle == 0) {
+		fprintf(stderr, "DRM: no cursor buffer, using software cursor\n");
+		fHardwareCursorEnabled = false;
 		return;
 	}
 
-	if (fAtomicSupported && fCursorPlaneId && dev->cursor_fb) {
+	// Legacy by default. An atomic cursor commit is a second non-blocking
+	// commit on a CRTC that already has a page flip in flight, which the
+	// kernel answers with EBUSY; Weston avoids that by batching the cursor
+	// into the frame's commit, which we do not do yet. VOS_ATOMIC_CURSOR
+	// opts in for testing that path.
+	static const char* sAtomicCursor = getenv("VOS_ATOMIC_CURSOR");
+	const bool canAtomic = sAtomicCursor != NULL && sAtomicCursor[0] != '\0'
+		&& fAtomicSupported && fCursorPlaneId != 0 && dev->cursor_fb != 0;
+
+	int r = -1;
+	if (canAtomic) {
 		r = (_AtomicSetCursor(dev->cursor_fb, dev->crtc,
 			0, 0, dev->cursor_w, dev->cursor_h) == B_OK) ? 0 : -1;
 		if (r == 0) {
+			fprintf(stderr, "DRM: hardware cursor via atomic plane\n");
+			fCursorUsesAtomic = true;
 			fHardwareCursorEnabled = true;
-			_AtomicSetCursor(0, 0, 0, 0, 0, 0);
+			_DisableHardwareCursor();
 			return;
 		}
-		fprintf(stderr,
-			"DRM: hardware cursor not supported (legacy: %s, atomic: "
-			"failed), using software cursor\n", strerror(-r));
-	} else {
-		fprintf(stderr,
-			"DRM: hardware cursor not supported (%s), using software "
-			"cursor\n", strerror(-r));
 	}
+
+	fCursorUsesAtomic = false;
+	r = drmModeSetCursor(fFd, dev->crtc,
+		dev->cursor_handle, dev->cursor_w, dev->cursor_h);
+	if (r == 0) {
+		fprintf(stderr, "DRM: hardware cursor via legacy ioctl\n");
+		fHardwareCursorEnabled = true;
+		_DisableHardwareCursor();
+		return;
+	}
+
+	fprintf(stderr,
+		"DRM: hardware cursor not supported (%s), using software "
+		"cursor\n", strerror(-r));
 	fHardwareCursorEnabled = false;
 }
 
@@ -1899,6 +2234,214 @@ DrmHWInterface::_DiscoverCrtcProps(uint32_t crtc_id)
 }
 
 
+// Precedence: kernel connector property, then the DMI quirk table, then
+// VOS_PANEL_ORIENTATION (to test/flip rotation direction without a rebuild).
+void
+DrmHWInterface::_DiscoverPanelOrientation()
+{
+	fPanelOrientation = PANEL_ORIENTATION_NORMAL;
+
+	struct modeset_dev* dev = get_dev();
+	if (dev != NULL && fFd >= 0) {
+		drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(
+			fFd, dev->conn, DRM_MODE_OBJECT_CONNECTOR);
+		if (props != NULL) {
+			for (uint32_t i = 0; i < props->count_props; i++) {
+				drmModePropertyPtr prop
+					= drmModeGetProperty(fFd, props->props[i]);
+				if (prop == NULL)
+					continue;
+				if (strcmp(prop->name, "panel orientation") == 0
+						&& props->prop_values[i]
+							<= PANEL_ORIENTATION_RIGHT_UP) {
+					fPanelOrientation
+						= (enum PanelOrientation)props->prop_values[i];
+				}
+				drmModeFreeProperty(prop);
+			}
+			drmModeFreeObjectProperties(props);
+		}
+	}
+
+	if (fPanelOrientation == PANEL_ORIENTATION_NORMAL && dev != NULL
+			&& _ApplyDmiOrientationQuirk(dev->width, dev->height)) {
+		fprintf(stderr, "DrmHWInterface: panel orientation from DMI "
+			"quirk table\n");
+	}
+
+	const char* value = getenv("VOS_PANEL_ORIENTATION");
+	if (value == NULL || value[0] == '\0')
+		return;
+
+	if (strcmp(value, "normal") == 0 || strcmp(value, "0") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_NORMAL;
+	else if (strcmp(value, "upside-down") == 0 || strcmp(value, "1") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_UPSIDE_DOWN;
+	else if (strcmp(value, "left-up") == 0 || strcmp(value, "2") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_LEFT_UP;
+	else if (strcmp(value, "right-up") == 0 || strcmp(value, "3") == 0)
+		fPanelOrientation = PANEL_ORIENTATION_RIGHT_UP;
+	else {
+		fprintf(stderr, "DrmHWInterface: unrecognized VOS_PANEL_ORIENTATION "
+			"'%s' (want normal|upside-down|left-up|right-up or 0-3), "
+			"ignoring\n", value);
+		return;
+	}
+
+	fprintf(stderr, "DrmHWInterface: panel orientation overridden to "
+		"'%s' via VOS_PANEL_ORIENTATION\n", value);
+}
+
+
+int32
+DrmHWInterface::PanelOrientation() const
+{
+	return (int32)fPanelOrientation;
+}
+
+
+status_t
+DrmHWInterface::SetPanelOrientation(int32 orientation)
+{
+	if (orientation < -1 || orientation > PANEL_ORIENTATION_RIGHT_UP)
+		return B_BAD_VALUE;
+
+	enum PanelOrientation previous = fPanelOrientation;
+	if (orientation < 0)
+		_DiscoverPanelOrientation();
+	else
+		fPanelOrientation = (enum PanelOrientation)orientation;
+
+	if (fPanelOrientation == previous)
+		return B_OK;
+
+	struct modeset_dev* dev = get_dev();
+	if (dev == NULL) {
+		fPanelOrientation = previous;
+		return B_ERROR;
+	}
+
+	// The panel itself never changes shape, so re-derive the logical size
+	// from the unchanged physical one and let SetMode() do the teardown.
+	uint32_t logW, logH;
+	_ApplyOrientationSwap(dev->width, dev->height, logW, logH);
+
+	display_mode mode = fDisplayMode;
+	mode.virtual_width = (uint16)logW;
+	mode.virtual_height = (uint16)logH;
+
+	status_t status = SetMode(mode);
+	if (status != B_OK) {
+		fPanelOrientation = previous;
+		return status;
+	}
+
+	// SetMode() stays silent for app-initiated callers; nothing else will
+	// tell Desktop that the frame and the input orientation just changed.
+	_NotifyScreenChanged();
+	return B_OK;
+}
+
+
+// dev->width/height (physical scanout) <-> fDisplayMode.virtual_width/height
+// (logical desktop) differ by an axis swap whenever the panel is mounted
+// sideways. The swap is its own inverse, so one function covers both
+// directions.
+void
+DrmHWInterface::_ApplyOrientationSwap(uint32_t w, uint32_t h,
+	uint32_t& outW, uint32_t& outH) const
+{
+	if (fPanelOrientation == PANEL_ORIENTATION_LEFT_UP
+			|| fPanelOrientation == PANEL_ORIENTATION_RIGHT_UP) {
+		outW = h;
+		outH = w;
+	} else {
+		outW = w;
+		outH = h;
+	}
+}
+
+
+// Rotated would need a pre-rotated sprite, which we deliberately do not
+// produce; a cursor plane advertising DRM rotation would relax that, the way
+// Weston's drm_rotation_from_output_transform() does. Without a cursor plane
+// the legacy ioctl still works, but the sprite is then serviced by a plane we
+// cannot see and a virtualized host may draw or hide it as its own pointer,
+// so Weston declines it too (backend-drm/kms.c, "if (!plane) return").
+bool
+DrmHWInterface::_HardwareCursorUsable() const
+{
+	static const char* sForceHw = getenv("VOS_HW_CURSOR");
+	static bool sForceHwCursor = sForceHw != NULL && sForceHw[0] != '\0';
+
+	return fPanelOrientation == PANEL_ORIENTATION_NORMAL
+		&& (fCursorPlaneId != 0 || sForceHwCursor);
+}
+
+
+namespace {
+
+struct PanelOrientationQuirk {
+	const char* sysVendor;
+	const char* productName;
+	uint32_t width, height;
+	PanelOrientation orientation;
+};
+
+// Only for kernels predating the same quirk in the kernel's own
+// drm_panel_orientation_quirks.c; a newer one answers through the connector
+// property. Matching mirrors upstream's: substring on the vendor, which
+// these vendors pad, and exact on the product name.
+const PanelOrientationQuirk kPanelOrientationQuirks[] = {
+	{ "CHUWI", "MiniBook X", 1200, 1920, PANEL_ORIENTATION_RIGHT_UP },
+};
+
+bool
+read_dmi_field(const char* name, char* out, size_t outSize)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/sys/class/dmi/id/%s", name);
+	FILE* f = fopen(path, "r");
+	if (f == NULL)
+		return false;
+	bool ok = fgets(out, outSize, f) != NULL;
+	fclose(f);
+	if (ok) {
+		size_t len = strlen(out);
+		while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+			out[--len] = '\0';
+	}
+	return ok;
+}
+
+}	// namespace
+
+
+// Resolution guards against a reused BIOS string, as the kernel's does.
+bool
+DrmHWInterface::_ApplyDmiOrientationQuirk(uint32_t width, uint32_t height)
+{
+	char sysVendor[128], productName[128];
+	if (!read_dmi_field("sys_vendor", sysVendor, sizeof(sysVendor))
+			|| !read_dmi_field("product_name", productName,
+				sizeof(productName)))
+		return false;
+
+	for (size_t i = 0;
+			i < sizeof(kPanelOrientationQuirks)
+				/ sizeof(kPanelOrientationQuirks[0]); i++) {
+		const PanelOrientationQuirk& q = kPanelOrientationQuirks[i];
+		if (strstr(sysVendor, q.sysVendor) != NULL
+				&& strcmp(productName, q.productName) == 0
+				&& width == q.width && height == q.height) {
+			fPanelOrientation = q.orientation;
+			return true;
+		}
+	}
+	return false;
+}
+
+
 void
 DrmHWInterface::_DiscoverConnProps(uint32_t conn_id)
 {
@@ -1928,18 +2471,7 @@ DrmHWInterface::_AtomicModeset(uint32_t fb_id, drmModeModeInfo* mode)
 	if (!dev || !fPrimaryPlaneId)
 		return B_ERROR;
 
-	// Drain flipping events
-	for (int i = 0; i < 4 && fPageFlipPending; i++) {
-		struct pollfd pfd = { fFd, POLLIN, 0 };
-		if (poll(&pfd, 1, 16) > 0 && (pfd.revents & POLLIN)) {
-			drmEventContext evctx = {
-				.version           = DRM_EVENT_CONTEXT_VERSION,
-				.page_flip_handler = _PageFlipHandler,
-			};
-			drmHandleEvent(fFd, &evctx);
-		} else
-			break;
-	}
+	_DrainPendingFlip();
 
 	if (fModeBlobId) {
 		drmModeDestroyPropertyBlob(fFd, fModeBlobId);

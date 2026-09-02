@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2015 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -562,6 +563,36 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 			fTVStandardField->Hide();
 	}
 
+	// The kernel's own names rather than degrees: the direction convention
+	// is not verified on hardware yet, so a degree label could lie.
+	static const struct {
+		const char*	name;
+		int32		rotation;
+	} kRotations[] = {
+		{ B_TRANSLATE_MARK("Auto"), -1 },
+		{ B_TRANSLATE_MARK("Normal"), 0 },
+		{ B_TRANSLATE_MARK("Upside down"), 1 },
+		{ B_TRANSLATE_MARK("Left side up"), 2 },
+		{ B_TRANSLATE_MARK("Right side up"), 3 }
+	};
+
+	fRotationMenu = new BPopUpMenu("Rotation", true, true);
+	for (uint32 i = 0; i < B_COUNT_OF(kRotations); i++) {
+		BMessage* message = new BMessage(POP_ROTATION_MSG);
+		message->AddInt32("rotation", kRotations[i].rotation);
+		fRotationMenu->AddItem(new BMenuItem(
+			B_TRANSLATE_NOCOLLECT(kRotations[i].name), message));
+	}
+
+	fOriginalRotation = fScreenMode.Rotation();
+	BMenuItem* rotationItem = fRotationMenu->ItemAt(fOriginalRotation + 1);
+	if (rotationItem != NULL)
+		rotationItem->SetMarked(true);
+
+	fRotationField = new BMenuField("RotationMenu",
+		B_TRANSLATE("Rotation:"), fRotationMenu);
+	fRotationField->SetAlignment(B_ALIGN_RIGHT);
+
 	BLayoutBuilder::Group<>(outerControlsView)
 		.AddGrid(B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)
 			.Add(fResolutionField->CreateLabelLayoutItem(), 0, 0)
@@ -578,6 +609,8 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 			.Add(fUseLaptopPanelField->CreateMenuBarLayoutItem(), 1, 5)
 			.Add(fTVStandardField->CreateLabelLayoutItem(), 0, 6)
 			.Add(fTVStandardField->CreateMenuBarLayoutItem(), 1, 6)
+			.Add(fRotationField->CreateLabelLayoutItem(), 0, 7)
+			.Add(fRotationField->CreateMenuBarLayoutItem(), 1, 7)
 		.End();
 
 	// TODO: we don't support getting the screen's preferred settings
@@ -1136,6 +1169,30 @@ ScreenWindow::MessageReceived(BMessage* message)
 			break;
 		}
 
+		case POP_ROTATION_MSG:
+		{
+			int32 rotation;
+			if (message->FindInt32("rotation", &rotation) != B_OK)
+				break;
+
+			// Applied at once rather than on Apply: rotation does not go
+			// through the mode list, so there is nothing to negotiate.
+			if (fScreenMode.SetRotation(rotation) != B_OK) {
+				BAlert* alert = new BAlert(B_TRANSLATE("Rotation"),
+					B_TRANSLATE("This graphics backend cannot rotate the "
+						"screen."),
+					B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
+					B_WARNING_ALERT);
+				alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+				alert->Go(NULL);
+
+				BMenuItem* item = fRotationMenu->ItemAt(fOriginalRotation + 1);
+				if (item != NULL)
+					item->SetMarked(true);
+			}
+			break;
+		}
+
 		case POP_COMBINE_DISPLAYS_MSG:
 		{
 			// new combine mode has bee chosen
@@ -1211,6 +1268,12 @@ ScreenWindow::MessageReceived(BMessage* message)
 			BScreen screen(this);
 			screen.SetBrightness(fOriginalBrightness);
 			fBrightnessSlider->SetValue(fOriginalBrightness * 255);
+
+			fScreenMode.SetRotation(fOriginalRotation);
+			BMenuItem* rotationItem
+				= fRotationMenu->ItemAt(fOriginalRotation + 1);
+			if (rotationItem != NULL)
+				rotationItem->SetMarked(true);
 
 			_UpdateActiveMode();
 			break;

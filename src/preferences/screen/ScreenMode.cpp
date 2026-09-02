@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2011, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -16,6 +17,7 @@
 #include <algorithm>
 
 #include <InterfaceDefs.h>
+#include <PrivateScreen.h>
 #include <String.h>
 
 #include <compute_display_timing.h>
@@ -438,6 +440,38 @@ ScreenMode::GetDeviceInfo(accelerant_device_info& info)
 {
 	BScreen screen(fWindow);
 	return screen.GetDeviceInfo(&info);
+}
+
+
+status_t
+ScreenMode::SetRotation(int32 rotation)
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return B_ERROR;
+
+	status_t status = screen->SetRotation(rotation);
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return status;
+}
+
+
+int32
+ScreenMode::Rotation() const
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return 0;
+
+	int32 rotation;
+	if (screen->GetRotation(&rotation) != B_OK)
+		rotation = 0;
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return rotation;
 }
 
 

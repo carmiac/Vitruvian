@@ -210,6 +210,7 @@ _do_commit_setup() {
         log "cannot remove installer polkit rule"; return 3; }
     $_in systemctl disable ssh.service 2>/dev/null || true
     $_in systemctl disable sshd.service 2>/dev/null || true
+    $_in systemctl disable ssh.socket 2>/dev/null || true
 
     log "commit-setup complete for user $_username"
     return 0
