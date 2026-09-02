@@ -83,6 +83,8 @@ public:
 	virtual	status_t			SetMode(const display_mode& mode);
 	virtual	void				GetMode(display_mode* mode);
 	virtual	status_t			GetPreferredMode(display_mode* mode);
+	virtual	int32				PanelOrientation() const;
+	virtual	status_t			SetPanelOrientation(int32 orientation);
 
 	virtual status_t			GetDeviceInfo(accelerant_device_info* info);
 	virtual status_t			GetFrameBufferConfig(
@@ -182,6 +184,11 @@ private:
 			void				_DiscoverPanelOrientation();
 			bool				_ApplyDmiOrientationQuirk(uint32_t width,
 									uint32_t height);
+			void				_ApplyOrientationSwap(uint32_t w, uint32_t h,
+									uint32_t& outW, uint32_t& outH) const;
+			// False when rotated or when we own no cursor plane.
+			// VOS_HW_CURSOR forces the legacy sprite on for testing.
+			bool				_HardwareCursorUsable() const;
 
 			status_t			_AtomicModeset(uint32_t fb_id,
 									drmModeModeInfo* mode);
@@ -258,8 +265,10 @@ private:
 			bool				fVRRSupported;
 			bool				fVRREnabled;
 
-			// Detected but not yet consumed; issue #229, Stage 0 only.
-			PanelOrientation	fPanelOrientation;
+			// Elaborated as "enum PanelOrientation": the PanelOrientation()
+			// accessor above hides the bare type name inside this class.
+			enum PanelOrientation
+								fPanelOrientation;
 };
 
 #endif

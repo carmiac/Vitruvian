@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2020, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -130,6 +131,8 @@ public:
 			void				RevertScreenModes(uint32 workspaces);
 
 			status_t			SetBrightness(int32 id, float brightness);
+			status_t			SetRotation(int32 id, int32 rotation);
+			int32				Rotation(int32 id) const;
 
 			MultiLocker&		ScreenLocker() { return fScreenLock; }
 

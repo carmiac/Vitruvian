@@ -1,5 +1,5 @@
 /*
- * Copyright 2024, Dario Casalinuovo
+ * Copyright 2024-2026, Dario Casalinuovo
  * Distributed under the terms of the LGPL License.
  */
 #ifndef LIBEVDEV_EVENT_STREAM_H
@@ -33,14 +33,19 @@ struct EvdevDevice {
 
 class LibEvdevEventStream : public EventStream {
 public:
+								// orientation: DRM_MODE_PANEL_ORIENTATION_*,
+								// -1 to derive it from VOS_PANEL_ORIENTATION.
 								LibEvdevEventStream(uint32 width, uint32 height,
-									struct libseat* seat);
+									struct libseat* seat,
+									int32 orientation = -1);
 	virtual						~LibEvdevEventStream();
 
 	virtual	bool				IsValid() { return !fDevices.empty(); }
 	virtual	void				SendQuit() { fRunning = false; }
 
 	virtual	void				UpdateScreenBounds(BRect bounds);
+	virtual	void				UpdateScreenBounds(BRect bounds,
+									int32 orientation);
 	virtual	bool				GetNextEvent(BMessage** _event);
 	virtual	status_t			InsertEvent(BMessage* event);
 	virtual	BMessage*			PeekLatestMouseMoved();
@@ -61,6 +66,8 @@ private:
 	// Event processing
 			void				_ProcessKeyEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_ProcessRelEvent(EvdevDevice& dev, struct input_event& ev);
+			void				_RotateDelta(float dx, float dy,
+									float& outDx, float& outDy) const;
 			void				_ProcessAbsEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_ProcessButtonEvent(EvdevDevice& dev, struct input_event& ev);
 			void				_FlushPendingEvents();
@@ -84,6 +91,10 @@ private:
 	// Mouse state
 			BPoint					fMousePosition;
 			BPoint					fPendingMouseDelta;
+			// Last known normalized (0..1) position in physical panel
+			// space; ABS_X/ABS_Y arrive as separate events, so each one
+			// re-rotates using the other axis' last known value.
+			float					fLastAbsU, fLastAbsV;
 			uint32					fMouseButtons;
 			uint32					fModifiers;
 			uint32					fOldModifiers;
@@ -100,6 +111,7 @@ private:
 			volatile bool			fSuspended;
 			uint32					fWidth;
 			uint32					fHeight;
+			int32					fOrientation;
 
 	// libseat integration
 			struct libseat*			fSeat;

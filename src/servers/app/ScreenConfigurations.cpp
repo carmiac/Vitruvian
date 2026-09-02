@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2009, Axel Dörfler, axeld@pinc-software.de.
+ * Copyright 2026, Dario Casalinuovo.
  * This file may be used under the terms of the MIT License.
  */
 
@@ -124,6 +125,10 @@ ScreenConfigurations::Set(int32 id, const monitor_info* info,
 		if (configuration == NULL)
 			return B_NO_MEMORY;
 
+		// POD with no constructor, and Set() does not touch either field.
+		configuration->brightness = 1.0f;
+		configuration->rotation = -1;
+
 		fConfigurations.AddItem(configuration);
 	}
 
@@ -150,6 +155,29 @@ ScreenConfigurations::SetBrightness(int32 id, float brightness)
 		screen_configuration* configuration = fConfigurations.ItemAt(i);
 		configuration->brightness = brightness;
 	}
+}
+
+
+void
+ScreenConfigurations::SetRotation(int32 id, int32 rotation)
+{
+	for (int32 i = fConfigurations.CountItems(); i-- > 0;) {
+		screen_configuration* configuration = fConfigurations.ItemAt(i);
+		configuration->rotation = rotation;
+	}
+}
+
+
+int32
+ScreenConfigurations::Rotation(int32 id)
+{
+	screen_configuration* configuration = fConfigurations.ItemAt(0);
+
+	// -1 is "auto", i.e. whatever the backend detected.
+	if (configuration == NULL)
+		return -1;
+
+	return configuration->rotation;
 }
 
 
@@ -207,6 +235,7 @@ ScreenConfigurations::Store(BMessage& settings) const
 		screenSettings.AddData("mode", B_RAW_TYPE, &configuration->mode,
 			sizeof(display_mode));
 		screenSettings.AddFloat("brightness", configuration->brightness);
+		screenSettings.AddInt32("rotation", configuration->rotation);
 
 		settings.AddMessage("screen", &screenSettings);
 	}
@@ -269,6 +298,8 @@ ScreenConfigurations::Restore(const BMessage& settings)
 
 		if (stored.FindFloat("brightness", &configuration->brightness) != B_OK)
 			configuration->brightness = 1.0f;
+		if (stored.FindInt32("rotation", &configuration->rotation) != B_OK)
+			configuration->rotation = -1;
 
 		fConfigurations.AddItem(configuration);
 	}

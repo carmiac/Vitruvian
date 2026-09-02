@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2012, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -95,6 +96,12 @@ public:
 									const display_mode* high) = 0;
 	virtual	status_t			GetPreferredMode(display_mode* mode);
 	virtual status_t			GetMonitorInfo(monitor_info* info);
+
+	// 0..3, matching DRM_MODE_PANEL_ORIENTATION_*; NORMAL unless overridden.
+	virtual	int32				PanelOrientation() const { return 0; }
+	// -1 restores auto-detected; B_UNSUPPORTED backends hide the control.
+	virtual	status_t			SetPanelOrientation(int32)
+									{ return B_UNSUPPORTED; }
 
 	virtual sem_id				RetraceSemaphore() = 0;
 	virtual status_t			WaitForRetrace(

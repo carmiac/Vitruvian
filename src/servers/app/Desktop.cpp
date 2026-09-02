@@ -522,6 +522,18 @@ Desktop::Init()
 		fWorkspaces[i].RestoreConfiguration(*fSettings->WorkspacesMessage(i));
 	}
 
+	// Before the screen is acquired, so SetConfiguration() sees the rotated
+	// geometry and the change notification has no listeners yet. -1 is auto,
+	// i.e. keep whatever the backend detected.
+	int32 rotation = fWorkspaces[0].StoredScreenConfiguration().Rotation(0);
+	if (rotation >= 0) {
+		gScreenManager->Lock();
+		Screen* rotated = gScreenManager->ScreenAt(0);
+		if (rotated != NULL)
+			rotated->HWInterface()->SetPanelOrientation(rotation);
+		gScreenManager->Unlock();
+	}
+
 	status_t status = fVirtualScreen.SetConfiguration(*this,
 		fWorkspaces[0].CurrentScreenConfiguration());
 	if (status != B_OK) {
@@ -603,6 +615,11 @@ Desktop::Init()
 	// draw the background
 
 	fScreenRegion = fVirtualScreen.Frame();
+
+	// _ScreenChanged() normally does this, but nothing calls it at cold
+	// boot, only on later mode changes.
+	gInputManager->UpdateScreenBounds(fVirtualScreen.Frame(),
+		HWInterface()->PanelOrientation());
 
 	BRegion stillAvailableOnScreen;
 	_RebuildClippingForAllWindows(stillAvailableOnScreen);
@@ -970,6 +987,37 @@ Desktop::SetBrightness(int32 id, float brightness)
 	}
 
 	return result;
+}
+
+
+status_t
+Desktop::SetRotation(int32 id, int32 rotation)
+{
+	// Not locked: HWInterface notifies listeners synchronously and
+	// Desktop::ScreenChanged() takes the window lock for writing.
+	status_t result = HWInterface()->SetPanelOrientation(rotation);
+
+	if (result == B_OK) {
+		ScreenConfigurations& stored
+			= fWorkspaces[0].StoredScreenConfiguration();
+		if (stored.CurrentByID(id) == NULL) {
+			screen_configuration* current
+				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+			stored.Set(id, current->has_info ? &current->info : NULL,
+				current->frame, current->mode);
+		}
+		stored.SetRotation(id, rotation);
+		StoreWorkspaceConfiguration(0);
+	}
+
+	return result;
+}
+
+
+int32
+Desktop::Rotation(int32 id) const
+{
+	return HWInterface()->PanelOrientation();
 }
 
 
@@ -3631,7 +3679,8 @@ Desktop::_ScreenChanged(Screen* screen)
 
 	// update our cached screen region
 	fScreenRegion.Set(screen->Frame());
-	gInputManager->UpdateScreenBounds(screen->Frame());
+	gInputManager->UpdateScreenBounds(screen->Frame(),
+		screen->HWInterface()->PanelOrientation());
 
 	BRegion background;
 	_RebuildClippingForAllWindows(background);

@@ -1,5 +1,6 @@
 /*
  * Copyright 2005, Haiku, Inc. All Rights Reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -87,15 +88,15 @@ InputManager::PutStream(EventStream* stream)
 
 
 void
-InputManager::UpdateScreenBounds(BRect bounds)
+InputManager::UpdateScreenBounds(BRect bounds, int32 orientation)
 {
 	BAutolock _(this);
 
 	for (int32 i = fUsedStreams.CountItems(); i-- > 0;) {
-		fUsedStreams.ItemAt(i)->UpdateScreenBounds(bounds);
+		fUsedStreams.ItemAt(i)->UpdateScreenBounds(bounds, orientation);
 	}
 
 	for (int32 i = fFreeStreams.CountItems(); i-- > 0;) {
-		fFreeStreams.ItemAt(i)->UpdateScreenBounds(bounds);
+		fFreeStreams.ItemAt(i)->UpdateScreenBounds(bounds, orientation);
 	}
 }

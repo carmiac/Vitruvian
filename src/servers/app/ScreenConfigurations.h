@@ -1,5 +1,6 @@
 /*
  * Copyright 2009, Axel Dörfler, axeld@pinc-software.de.
+ * Copyright 2026, Dario Casalinuovo.
  * This file may be used under the terms of the MIT License.
  */
 #ifndef SCREEN_CONFIGURATIONS_H
@@ -21,6 +22,7 @@ struct screen_configuration {
 	BRect			frame;
 	display_mode	mode;
 	float			brightness;
+	int32			rotation;
 	bool			has_info;
 	bool			is_current;
 };
@@ -40,6 +42,8 @@ public:
 									const display_mode& mode);
 			void				SetBrightness(int32 id, float brightness);
 			float				Brightness(int32 id);
+			void				SetRotation(int32 id, int32 rotation);
+			int32				Rotation(int32 id);
 			void				Remove(screen_configuration* configuration);
 
 			status_t			Store(BMessage& settings) const;
