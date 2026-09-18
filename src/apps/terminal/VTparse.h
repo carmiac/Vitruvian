@@ -107,3 +107,10 @@
 #define CASE_CSI_EXCL 104
 #define CASE_DECSTR 105
 
+#define CASE_CSI_IGNORE_STATE 106	/* ESC [ < or ESC [ = - consume the rest */
+#define CASE_CSI_GT_STATE 107		/* ESC [ > - consume, but answer DA2 */
+#define CASE_DA2 108				/* secondary device attributes */
+#define CASE_CSI_EQ_STATE 109		/* ESC [ = - consume, but answer DA3 */
+#define CASE_DA3 110				/* tertiary device attributes */
+#define CASE_XTVERSION 111			/* ESC [ > q - terminal name/version */
+

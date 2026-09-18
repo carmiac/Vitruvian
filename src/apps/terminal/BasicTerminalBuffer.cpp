@@ -768,14 +768,18 @@ BasicTerminalBuffer::InsertTab()
 void
 BasicTerminalBuffer::InsertCursorBackTab(int32 numTabs)
 {
-	int32 x = fCursor.x - 1;
+	int32 x = fCursor.x;
 
 	fSoftWrappedCursor = false;
 
-	// Find the next tab stop
-	while (numTabs-- > 0)
-		for (; x >=0 && !fTabStops[x]; x--)
+	// Find the previous tab stop, numTabs times.
+	while (numTabs-- > 0) {
+		for (x--; x > 0 && !fTabStops[x]; x--)
 			;
+		if (x <= 0)
+			break;
+	}
+
 	// Ensure x stays within the line bounds
 	x = restrict_value(x, 0, fWidth - 1);
 

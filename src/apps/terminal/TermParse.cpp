@@ -22,6 +22,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
@@ -58,6 +59,42 @@ extern const char* gLineDrawGraphSet[]; /* may be used for G0, G1, G2, G3 */
 #define NPARAM 10		// Max parameters
 
 static const bigtime_t kThreadStopTimeout = 2000000;
+
+/*!	Parse tables for a CSI sequence introduced by a private parameter byte
+	we do not implement (ESC [ < , ESC [ = and ESC [ >).
+*/
+static int sCsiIgnoreTable[256];
+static int sCsiGtTable[256];
+static int sCsiEqTable[256];
+static pthread_once_t sPrivateCsiTablesOnce = PTHREAD_ONCE_INIT;
+
+// Reported by XTVERSION. xterm's convention for this is Name(version).
+static const char* const kXtversionReply = "\033P>|Terminal(1.0)\033\\";
+	// DCS > | text ST
+
+// Tertiary device attributes: a four byte unit id, conventionally zeroes.
+static const char* const kDa3Reply = "\033P!|00000000\033\\";
+	// DCS ! | text ST
+
+
+static void
+init_private_csi_tables()
+{
+	memcpy(sCsiIgnoreTable, gCsiTable, sizeof(sCsiIgnoreTable));
+	for (int i = 0x20; i <= 0x3F; i++)
+		sCsiIgnoreTable[i] = CASE_IGNORE;
+	for (int i = 0x40; i <= 0x7E; i++)
+		sCsiIgnoreTable[i] = CASE_GROUND_STATE;
+
+	// as above, but ESC [ > c and ESC [ > q are dealt with
+	memcpy(sCsiGtTable, sCsiIgnoreTable, sizeof(sCsiGtTable));
+	sCsiGtTable['c'] = CASE_DA2;
+	sCsiGtTable['q'] = CASE_XTVERSION;
+
+	// and ESC [ = c is the tertiary device attributes request
+	memcpy(sCsiEqTable, sCsiIgnoreTable, sizeof(sCsiEqTable));
+	sCsiEqTable['c'] = CASE_DA3;
+}
 
 //! Get char from pty reader buffer.
 inline uchar
@@ -520,6 +557,8 @@ TermParse::EscParse()
 	int curGL = 0;
 	int curGR = 0;
 
+	pthread_once(&sPrivateCsiTablesOnce, init_private_csi_tables);
+
 	BAutolock locker(fBuffer);
 
 	while (!fQuitting) {
@@ -736,6 +775,44 @@ TermParse::EscParse()
 				case CASE_IGNORE:
 					/* Ignore character */
 					break;
+
+				case CASE_CSI_IGNORE_STATE:
+					/* ESC [ < or ESC [ = : consume the whole sequence. */
+					parsestate = sCsiIgnoreTable;
+					break;
+
+				case CASE_CSI_GT_STATE:
+					parsestate = sCsiGtTable;
+					break;
+
+				case CASE_CSI_EQ_STATE:
+					parsestate = sCsiEqTable;
+					break;
+
+				case CASE_DA2:
+				{
+					/* Report ourselves as a VT220 ("1"), firmware version 0, no cartridge. */
+					BString reply("\033[>1;0;0c");
+					_WriteReply(reply);
+					parsestate = groundtable;
+					break;
+				}
+
+				case CASE_DA3:
+				{
+					BString reply(kDa3Reply);
+					_WriteReply(reply);
+					parsestate = groundtable;
+					break;
+				}
+
+				case CASE_XTVERSION:
+				{
+					BString reply(kXtversionReply);
+					_WriteReply(reply);
+					parsestate = groundtable;
+					break;
+				}
 
 				case CASE_LS1:
 					/* select G1 into GL */
@@ -1767,17 +1844,17 @@ TermParse::_DecPrivateModeRequest(int value)
 	switch (value) {
 		case 12:
 			// Request cursor blinking mode
-			reply.SetToFormat("\033[?12;%u$y\033\\",
+			reply.SetToFormat("\033[?12;%u$y",
 				fBuffer->IsMode(MODE_CURSOR_BLINKING) ? 1 : 2);
 			break;
 		case 1006:
 			// Request extended mouse coordinates with SGR scheme
-			reply.SetToFormat("\033[?1006;%u$y\033\\",
+			reply.SetToFormat("\033[?1006;%u$y",
 				fBuffer->IsMode(MODE_EXTENDED_MOUSE_COORDINATES) ? 1 : 2);
 			break;
 		case 2004:
 			// Request bracketed paste mode
-			reply.SetToFormat("\033[?2004;%u$y\033\\",
+			reply.SetToFormat("\033[?2004;%u$y",
 				fBuffer->IsMode(MODE_BRACKETED_PASTE) ? 1 : 2);
 			break;
 		default:
