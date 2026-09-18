@@ -209,6 +209,10 @@ public:
 									BObjectList<FontCacheReference, true>& fallbacks,
 									const ServerFont& font, bool forceVector);
 
+	static FontCacheReference*	AddDynamicFallback(
+									BObjectList<FontCacheReference, true>& fallbacks,
+									const ServerFont& font, bool forceVector,
+									uint32 charCode);
 	static FontCacheReference*	GetFallbackReference(
 									BObjectList<FontCacheReference, true>& fallbacks,
 									uint32 charCode);
@@ -392,6 +396,12 @@ GlyphLayoutEngine::_CreateGlyph(FontCacheReference& cacheReference,
 		PopulateFallbacks(fallbacks, font, forceVector);
 
 	FontCacheReference* fallbackReference = GetFallbackReference(fallbacks, charCode);
+	if (fallbackReference == NULL) {
+		// None of the preferred families has it, find a fallback
+		fallbackReference = AddDynamicFallback(fallbacks, font, forceVector,
+			charCode);
+	}
+
 	if (fallbackReference != NULL) {
 		if (cacheReference.SetFallback(fallbackReference))
 			return entry->CreateGlyph(charCode, fallbackReference->Entry());
@@ -478,6 +488,49 @@ GlyphLayoutEngine::PopulateFallbacks(
 	}
 
 	gFontManager->Unlock();
+}
+
+
+/*!	Looks for any installed font that can render charCode and add to fallbacks.
+
+	Searches after the hard coded fallbacks have failed and cahces the result.
+*/
+inline FontCacheReference*
+GlyphLayoutEngine::AddDynamicFallback(
+	BObjectList<FontCacheReference, true>& fallbacks, const ServerFont& font,
+	bool forceVector, uint32 charCode)
+{
+	if (!gFontManager->Lock())
+		return NULL;
+
+	FontStyle* style = gFontManager->FindStyleForCharacter(charCode);
+	if (style == NULL) {
+		gFontManager->Unlock();
+		return NULL;
+	}
+
+	// Keep the manager locked while the style is cached.
+	ServerFont fallbackFont(*style, font.Size());
+	FontCacheEntry* entry = FontCacheEntryFor(fallbackFont, forceVector);
+
+	gFontManager->Unlock();
+
+	if (entry == NULL)
+		return NULL;
+
+	FontCacheReference* cacheReference = new(std::nothrow) FontCacheReference();
+	if (cacheReference == NULL) {
+		FontCache::Default()->Recycle(entry);
+		return NULL;
+	}
+
+	cacheReference->SetTo(entry);
+	if (!fallbacks.AddItem(cacheReference)) {
+		delete cacheReference;
+		return NULL;
+	}
+
+	return entry->CanCreateGlyph(charCode) ? cacheReference : NULL;
 }
 
 

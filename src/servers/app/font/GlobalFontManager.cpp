@@ -14,6 +14,7 @@
 #include "GlobalFontManager.h"
 
 #include <new>
+#include <string.h>
 
 #include <Autolock.h>
 #include <Debug.h>
@@ -77,6 +78,20 @@ GlobalFontManager::font_directory::FindStyle(const node_ref& nodeRef) const
 	}
 
 	return NULL;
+}
+
+
+/*!	Should this entry be ignored by the font watcher? */
+static bool
+ignore_font_entry(const char* name)
+{
+	if (name == NULL || name[0] == '\0')
+		return true;
+
+	if (name[0] == '.')
+		return true;
+
+	return strstr(name, ".cache-") != NULL;
 }
 
 
@@ -154,14 +169,16 @@ GlobalFontManager::MessageReceived(BMessage* message)
 			switch (opcode) {
 				case B_ENTRY_CREATED:
 				{
-					const char* name;
-					uint64 dev, dir;
-					if (message->FindUInt64("device", &dev) != B_OK
-						|| message->FindUInt64("directory", &dir) != B_OK
-						|| message->FindString("name", &name) != B_OK)
+					// VOS node monitor uses "virtual:directory", 
+					entry_ref dirRef;
+					if (message->FindRef("virtual:directory", &dirRef) != B_OK)
 						break;
-					node_ref nodeRef;
-					nodeRef.set_to((dev_t)dev, (ino_t)dir);
+
+					const char* name = dirRef.name;
+					if (name == NULL || ignore_font_entry(name))
+						break;
+
+					node_ref nodeRef(dirRef.vdevice(), dirRef.vdirectory());
 
 					// TODO: make this better (possible under Haiku)
 					snooze(100000);
@@ -200,6 +217,8 @@ GlobalFontManager::MessageReceived(BMessage* message)
 						|| message->FindUInt64("from directory", (int64 *)&fromNode) != B_OK
 						|| message->FindUInt64("node", (int64 *)&node) != B_OK
 						|| message->FindString("name", &name) != B_OK)
+						break;
+					if (ignore_font_entry(name))
 						break;
 					node_ref nodeRef;
 					nodeRef.set_to((dev_t)devVal, (ino_t)toDir);
@@ -690,6 +709,9 @@ GlobalFontManager::_ScanFonts()
 	if (fScanned)
 		return;
 
+	// fonts may have appeared or gone, so previous answers are stale
+	_InvalidateCharacterCache();
+
 	for (int32 i = fDirectories.CountItems(); i-- > 0;) {
 		font_directory* directory = fDirectories.ItemAt(i);
 
@@ -833,12 +855,12 @@ GlobalFontManager::_AddPath(BEntry& entry, font_directory** _newDirectory)
 	directory->group = stat.st_gid;
 	directory->scanned = false;
 
-	// Live font-dir hot-reload disabled: fontconfig writes sentinel
-	// files (.uuid, .cache-N) inside font dirs at scan time, which would
-	// fire FS_CLOSE_WRITE back to this watcher and re-trigger the scan
-	// in a tight loop. Restart app_server to pick up new fonts.
-	(void)nodeRef;
-	(void)entry;
+	// Watch for installed fonts.
+	status = watch_node(&nodeRef, B_WATCH_DIRECTORY, this);
+	if (status != B_OK) {
+		FTRACE(("GlobalFontManager: cannot watch %s: %s\n",
+			entry.Name(), strerror(status)));
+	}
 
 	fDirectories.AddItem(directory);
 
@@ -954,6 +976,62 @@ GlobalFontManager::_ScanFontDirectory(font_directory& fontDirectory)
 
 	fontDirectory.scanned = true;
 	return B_OK;
+}
+
+
+/*!	\brief Finds if any installed style can render charCode.
+
+	This is the fallback if the hard coded fallback doesn't find something.
+
+	\return the style to use, or NULL if no installed font has the character.
+*/
+FontStyle*
+GlobalFontManager::FindStyleForCharacter(uint32 charCode)
+{
+	BAutolock locker(this);
+	if (!locker.IsLocked())
+		return NULL;
+
+	_ScanFontsIfNecessary();
+
+	CharacterStyleMap::const_iterator found = fCharacterStyles.find(charCode);
+	if (found != fCharacterStyles.end())
+		return found->second;
+
+	FontStyle* result = NULL;
+
+	int32 familyCount = CountFamilies();
+	for (int32 i = 0; i < familyCount && result == NULL; i++) {
+		FontFamily* family = FamilyAt(i);
+		if (family == NULL)
+			continue;
+
+		int32 styleCount = family->CountStyles();
+		for (int32 j = 0; j < styleCount; j++) {
+			FontStyle* style = family->StyleAt(j);
+			if (style == NULL)
+				continue;
+
+			FT_Face face = style->FreeTypeFace();
+			if (face == NULL)
+				continue;
+
+			if (FT_Get_Char_Index(face, charCode) != 0) {
+				result = style;
+				break;
+			}
+		}
+	}
+
+	fCharacterStyles[charCode] = result;
+	return result;
+}
+
+
+void
+GlobalFontManager::_InvalidateCharacterCache()
+{
+	fCharacterStyles.clear();
 }
 
 

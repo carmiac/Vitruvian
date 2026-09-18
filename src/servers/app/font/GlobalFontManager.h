@@ -16,6 +16,8 @@
 #include <Looper.h>
 #include <ObjectList.h>
 
+#include <map>
+
 
 class BEntry;
 class BPath;
@@ -67,6 +69,8 @@ public:
 
 	virtual	uint32				Revision();
 
+			FontStyle*			FindStyleForCharacter(uint32 charCode);
+
 private:
 			struct font_directory;
 			struct font_mapping;
@@ -79,6 +83,7 @@ private:
 			void				_PrecacheFontFile(const ServerFont* font);
 			void				_AddSystemPaths();
 			void				_AddUserPaths();
+			void				_InvalidateCharacterCache();
 			font_directory*		_FindDirectory(node_ref& nodeRef);
 			void				_RemoveDirectory(font_directory* directory);
 			status_t			_CreateDirectories(const char* path);
@@ -110,6 +115,10 @@ private:
 
 			DirectoryList		fDirectories;
 			MappingList			fMappings;
+
+			// Cache which style covers a given character.
+			typedef std::map<uint32, FontStyle*>	CharacterStyleMap;
+			CharacterStyleMap	fCharacterStyles;
 
 			ObjectDeleter<ServerFont>
 								fDefaultPlainFont;
