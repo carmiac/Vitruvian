@@ -44,8 +44,13 @@ private:
 	status_t _InitTermParse();
 	status_t _InitPtyReader();
 
-	void _StopTermParse();
-	void _StopPtyReader();
+	status_t _StopTermParse();
+	status_t _StopPtyReader();
+
+	status_t _JoinThread(thread_id& thread, sem_id& doneSem,
+				const char* name);
+	void _WakePtyReader();
+	void _CloseWakeupPipe();
 
 	int32 EscParse();
 	int32 PtyReader();
@@ -72,6 +77,9 @@ private:
 	thread_id fReaderThread;
 	sem_id fReaderSem;
 	sem_id fReaderLocker;
+	sem_id fReaderDoneSem;
+	sem_id fParserDoneSem;
+	int fWakeupPipe[2];
 
 	uint fBufferPosition;
 	uchar fReadBuffer[READ_BUF_SIZE];

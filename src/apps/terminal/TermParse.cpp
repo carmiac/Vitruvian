@@ -18,6 +18,8 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -55,6 +57,7 @@ extern const char* gLineDrawGraphSet[]; /* may be used for G0, G1, G2, G3 */
 #define DEFAULT -1
 #define NPARAM 10		// Max parameters
 
+static const bigtime_t kThreadStopTimeout = 2000000;
 
 //! Get char from pty reader buffer.
 inline uchar
@@ -82,6 +85,8 @@ TermParse::TermParse(int fd)
 	fReaderThread(-1),
 	fReaderSem(-1),
 	fReaderLocker(-1),
+	fReaderDoneSem(-1),
+	fParserDoneSem(-1),
 	fBufferPosition(0),
 	fReadBufferSize(0),
 	fParserBufferSize(0),
@@ -89,6 +94,9 @@ TermParse::TermParse(int fd)
 	fBuffer(NULL),
 	fQuitting(true)
 {
+	fWakeupPipe[0] = -1;
+	fWakeupPipe[1] = -1;
+
 	memset(fReadBuffer, 0, READ_BUF_SIZE);
 	memset(fParserBuffer, 0, ESC_PARSER_BUFFER_SIZE);
 }
@@ -134,8 +142,19 @@ TermParse::StopThreads()
 
 	fQuitting = true;
 
-	_StopPtyReader();
-	_StopTermParse();
+	status_t readerStatus = _StopPtyReader();
+	status_t parserStatus = _StopTermParse();
+
+	if (readerStatus != B_OK || parserStatus != B_OK) {
+		// A thread did not leave its loop in time. Freeing the terminal
+		// buffer and this object while it is still running would take the
+		// whole application down, so leave everything in place and leak it
+		// instead. The destructor gives it one more try.
+		fprintf(stderr, "Terminal: TermParse::StopThreads(): PtyReader "
+			"(%" B_PRId32 ") or EscParse (%" B_PRId32 ") did not stop.\n",
+			fReaderThread, fParseThread);
+		return B_TIMED_OUT;
+	}
 
 	fBuffer = NULL;
 
@@ -150,11 +169,18 @@ TermParse::_InitTermParse()
 	if (fParseThread >= 0)
 		return B_ERROR; // we might want to return B_OK instead ?
 
+	fParserDoneSem = create_sem(0, "escparse_done_sem");
+	if (fParserDoneSem < 0)
+		return fParserDoneSem;
+
 	fParseThread = spawn_thread(_escparse_thread, "EscParse",
 		B_DISPLAY_PRIORITY, this);
 
-	if (fParseThread < 0)
+	if (fParseThread < 0) {
+		delete_sem(fParserDoneSem);
+		fParserDoneSem = -1;
 		return fParseThread;
+	}
 
 	resume_thread(fParseThread);
 
@@ -169,15 +195,36 @@ TermParse::_InitPtyReader()
 	if (fReaderThread >= 0)
 		return B_ERROR; // same as above
 
+	// The reader waits on this pipe next to the pty, so that we have a way
+	// to get it out of that wait when the terminal goes away. 
+	if (pipe2(fWakeupPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+		fWakeupPipe[0] = -1;
+		fWakeupPipe[1] = -1;
+		return -errno;
+	}
+
 	fReaderSem = create_sem(0, "pty_reader_sem");
-	if (fReaderSem < 0)
+	if (fReaderSem < 0) {
+		_CloseWakeupPipe();
 		return fReaderSem;
+	}
 
 	fReaderLocker = create_sem(0, "pty_locker_sem");
 	if (fReaderLocker < 0) {
 		delete_sem(fReaderSem);
 		fReaderSem = -1;
+		_CloseWakeupPipe();
 		return fReaderLocker;
+	}
+
+	fReaderDoneSem = create_sem(0, "pty_reader_done_sem");
+	if (fReaderDoneSem < 0) {
+		delete_sem(fReaderSem);
+		fReaderSem = -1;
+		delete_sem(fReaderLocker);
+		fReaderLocker = -1;
+		_CloseWakeupPipe();
+		return fReaderDoneSem;
 	}
 
 	fReaderThread = spawn_thread(_ptyreader_thread, "PtyReader",
@@ -187,6 +234,9 @@ TermParse::_InitPtyReader()
 		fReaderSem = -1;
 		delete_sem(fReaderLocker);
 		fReaderLocker = -1;
+		delete_sem(fReaderDoneSem);
+		fReaderDoneSem = -1;
+		_CloseWakeupPipe();
 		return fReaderThread;
 	}
 
@@ -196,20 +246,18 @@ TermParse::_InitPtyReader()
 }
 
 
-void
+status_t
 TermParse::_StopTermParse()
 {
-	if (fParseThread >= 0) {
-		status_t dummy;
-		wait_for_thread(fParseThread, &dummy);
-		fParseThread = -1;
-	}
+	return _JoinThread(fParseThread, fParserDoneSem, "EscParse");
 }
 
 
-void
+status_t
 TermParse::_StopPtyReader()
 {
+	_WakePtyReader();
+
 	if (fReaderSem >= 0) {
 		delete_sem(fReaderSem);
 		fReaderSem = -1;
@@ -219,14 +267,71 @@ TermParse::_StopPtyReader()
 		fReaderLocker = -1;
 	}
 
-	if (fReaderThread >= 0) {
-		// Vitruvian doesn't support suspend_thread
-		// Thread will exit naturally when it checks fQuitting flag (set in StopThreads)
-		// If thread is blocked on read(), wait_for_thread will wait until it unblocks
-		status_t status;
-		wait_for_thread(fReaderThread, &status);
+	status_t status = _JoinThread(fReaderThread, fReaderDoneSem, "PtyReader");
+	if (status != B_OK)
+		return status;
 
-		fReaderThread = -1;
+	_CloseWakeupPipe();
+
+	return B_OK;
+}
+
+
+/*!	Waits for \a thread to leave its loop. */
+status_t
+TermParse::_JoinThread(thread_id& thread, sem_id& doneSem, const char* name)
+{
+	if (thread < 0)
+		return B_OK;
+
+	if (doneSem < 0) {
+		fprintf(stderr, "Terminal: no way to join %s thread (%" B_PRId32
+			")\n", name, thread);
+		return B_ERROR;
+	}
+
+	status_t status;
+	do {
+		status = acquire_sem_etc(doneSem, 1, B_RELATIVE_TIMEOUT,
+			kThreadStopTimeout);
+	} while (status == B_INTERRUPTED);
+
+	if (status != B_OK) {
+		fprintf(stderr, "Terminal: %s thread (%" B_PRId32 ") did not stop: "
+			"%s\n", name, thread, strerror(status));
+		return status;
+	}
+
+	thread = -1;
+	delete_sem(doneSem);
+	doneSem = -1;
+
+	return B_OK;
+}
+
+
+/*!	Nudges the reader out of its wait on the pty. */
+void
+TermParse::_WakePtyReader()
+{
+	if (fWakeupPipe[1] < 0)
+		return;
+
+	char byte = 1;
+	ssize_t written = write(fWakeupPipe[1], &byte, 1);
+	(void)written;
+		// A full pipe just means the reader has been woken already.
+}
+
+
+void
+TermParse::_CloseWakeupPipe()
+{
+	for (int i = 0; i < 2; i++) {
+		if (fWakeupPipe[i] >= 0) {
+			close(fWakeupPipe[i]);
+			fWakeupPipe[i] = -1;
+		}
 	}
 }
 
@@ -248,6 +353,32 @@ TermParse::PtyReader()
 				return status;
 
 			bufferSize = fReadBufferSize;
+		}
+
+		// Wait until the pty has something for us, or until we are asked
+		// to quit. 
+		struct pollfd fds[2];
+		fds[0].fd = fFd;
+		fds[0].events = POLLIN;
+		fds[0].revents = 0;
+		fds[1].fd = fWakeupPipe[0];
+		fds[1].events = POLLIN;
+		fds[1].revents = 0;
+
+		if (poll(fds, 2, -1) < 0) {
+			if (errno == EINTR)
+				continue;
+			fBuffer->NotifyQuit(errno);
+			return B_OK;
+		}
+
+		if (fQuitting || (fds[1].revents & POLLIN) != 0) {
+			return B_OK;
+		}
+
+		if ((fds[0].revents
+				& (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0) {
+			continue;
 		}
 
 		// Read PTY
@@ -1336,14 +1467,28 @@ TermParse::EscParse()
 /*static*/ int32
 TermParse::_ptyreader_thread(void *data)
 {
-	return reinterpret_cast<TermParse *>(data)->PtyReader();
+	TermParse* parse = reinterpret_cast<TermParse *>(data);
+	sem_id doneSem = parse->fReaderDoneSem;
+
+	int32 result = parse->PtyReader();
+
+	release_sem(doneSem);
+
+	return result;
 }
 
 
 /*static*/ int32
 TermParse::_escparse_thread(void *data)
 {
-	return reinterpret_cast<TermParse *>(data)->EscParse();
+	TermParse* parse = reinterpret_cast<TermParse *>(data);
+	sem_id doneSem = parse->fParserDoneSem;
+
+	int32 result = parse->EscParse();
+
+	release_sem(doneSem);
+
+	return result;
 }
 
 
