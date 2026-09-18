@@ -75,6 +75,23 @@ struct UTF8Char {
 		return false;
 	}
 
+	bool IsZeroWidth() const
+	{
+		// ASCII is never zero-width
+		if ((bytes[0] & 0x80) == 0)
+			return false;
+
+		switch (BUnicodeChar::Type(BUnicodeChar::FromUTF8(bytes))) {
+			case B_UNICODE_NON_SPACING_MARK:
+			case B_UNICODE_ENCLOSING_MARK:
+			case B_UNICODE_FORMAT_CHAR:
+				return true;
+			default:
+				break;
+		}
+		return false;
+	}
+
 	bool IsSpace() const
 	{
 		return BUnicodeChar::IsSpace(BUnicodeChar::FromUTF8(bytes));

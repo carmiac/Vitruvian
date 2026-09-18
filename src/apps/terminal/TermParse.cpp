@@ -636,31 +636,25 @@ TermParse::EscParse()
 					break;
 
 				case CASE_UTF8_2BYTE:
-					cbuf[srcLen++] = c;
-					c = _NextParseChar();
-					if (groundtable[c] != CASE_UTF8_INSTRING)
-						break;
-					cbuf[srcLen++] = c;
-
-					fBuffer->InsertChar(UTF8Char(cbuf, srcLen));
-					break;
-
 				case CASE_UTF8_3BYTE:
+				case CASE_UTF8_4BYTE:
+				{
+					int32 charLen = UTF8Char::ByteCount(c);
 					cbuf[srcLen++] = c;
 
-					do {
+					while (srcLen < charLen) {
 						c = _NextParseChar();
 						if (groundtable[c] != CASE_UTF8_INSTRING) {
 							srcLen = 0;
 							break;
 						}
 						cbuf[srcLen++] = c;
-
-					} while (srcLen != 3);
+					}
 
 					if (srcLen > 0)
 						fBuffer->InsertChar(UTF8Char(cbuf, srcLen));
 					break;
+				}
 
 				case CASE_SCS_STATE:
 				{

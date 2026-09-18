@@ -106,4 +106,5 @@
 #define CASE_DECRQM 103
 #define CASE_CSI_EXCL 104
 #define CASE_DECSTR 105
+#define CASE_UTF8_4BYTE 106
 

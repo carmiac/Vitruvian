@@ -627,8 +627,10 @@ BasicTerminalBuffer::Find(const char* _pattern, const TermPos& start,
 void
 BasicTerminalBuffer::InsertChar(UTF8Char c)
 {
-//debug_printf("BasicTerminalBuffer::InsertChar('%.*s' (%d), %#lx)\n",
-//(int)c.ByteCount(), c.bytes, c.bytes[0], attributes);
+	if (c.IsZeroWidth()) {
+		return;
+	}
+
 	fLast = c;
 	int32 width = c.IsFullWidth() ? FULL_WIDTH : HALF_WIDTH;
 
